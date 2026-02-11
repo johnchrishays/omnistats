@@ -19,6 +19,8 @@ SD_SE_SPECS = [
     ("pv_cates_sds", "pv_cates_se"),
     ("pv_trees_sds", "pv_trees_se"),
     ("pv_ates_sds", "pv_ates_se"),
+    ("pv_ates_grouped_sds", "pv_ates_grouped_se"),
+    ("pv_ates_grouped_oracle_sds", "pv_ates_grouped_oracle_se"),
 ]
 
 
@@ -73,6 +75,25 @@ def ensure_columns(df, args):
     if "eval_cost" not in df.columns:
         df["eval_cost"] = df["c"]
 
+    if "pv_ates_grouped_means" not in df.columns:
+        df["pv_ates_grouped_means"] = df["pv_ates_means"]
+    if "pv_ates_grouped_sds" not in df.columns:
+        if "pv_ates_sds" in df.columns:
+            df["pv_ates_grouped_sds"] = df["pv_ates_sds"]
+        else:
+            df["pv_ates_grouped_sds"] = np.nan
+
+    if "pv_ates_grouped_oracle_means" not in df.columns:
+        if "pv_ates_oracle_means" in df.columns:
+            df["pv_ates_grouped_oracle_means"] = df["pv_ates_oracle_means"]
+        else:
+            df["pv_ates_grouped_oracle_means"] = df["pv_ates_means"]
+    if "pv_ates_grouped_oracle_sds" not in df.columns:
+        if "pv_ates_sds" in df.columns:
+            df["pv_ates_grouped_oracle_sds"] = df["pv_ates_sds"]
+        else:
+            df["pv_ates_grouped_oracle_sds"] = np.nan
+
     numeric_cols = [
         "run_id",
         "tree_train_cost",
@@ -81,18 +102,21 @@ def ensure_columns(df, args):
         "pv_cates_means",
         "pv_trees_means",
         "pv_ates_means",
+        "pv_ates_grouped_means",
+        "pv_ates_grouped_sds",
+        "pv_ates_grouped_oracle_means",
+        "pv_ates_grouped_oracle_sds",
     ]
     for col in numeric_cols:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
     if "cate_minus_tree_means" not in df.columns:
         df["cate_minus_tree_means"] = df["pv_cates_means"] - df["pv_trees_means"]
-    if "cate_minus_ate_means" not in df.columns:
-        df["cate_minus_ate_means"] = df["pv_cates_means"] - df["pv_ates_means"]
-    if "cate_minus_best_baseline_means" not in df.columns:
-        df["cate_minus_best_baseline_means"] = df["pv_cates_means"] - np.maximum(
-            df["pv_ates_means"], df["pv_trees_means"]
-        )
+    # Use grouped train/test ATE as the default ATE baseline in analysis.
+    df["cate_minus_ate_means"] = df["pv_cates_means"] - df["pv_ates_grouped_means"]
+    df["cate_minus_best_baseline_means"] = df["pv_cates_means"] - np.maximum(
+        df["pv_ates_grouped_means"], df["pv_trees_means"]
+    )
     if "n_rows" not in df.columns:
         df["n_rows"] = np.nan
     for sd_col, _ in SD_SE_SPECS:
@@ -107,7 +131,7 @@ def ensure_columns(df, args):
     for sd_col, _ in SD_SE_SPECS:
         df[sd_col] = pd.to_numeric(df[sd_col], errors="coerce")
 
-    df["best_baseline"] = np.where(df["pv_ates_means"] >= df["pv_trees_means"], "ate", "tree")
+    df["best_baseline"] = np.where(df["pv_ates_grouped_means"] >= df["pv_trees_means"], "ate", "tree")
     return df
 
 
@@ -147,9 +171,13 @@ def collapse_duplicates(df):
             pv_cates_means=("pv_cates_means", "mean"),
             pv_trees_means=("pv_trees_means", "mean"),
             pv_ates_means=("pv_ates_means", "mean"),
+            pv_ates_grouped_means=("pv_ates_grouped_means", "mean"),
+            pv_ates_grouped_oracle_means=("pv_ates_grouped_oracle_means", "mean"),
             pv_cates_sds=("pv_cates_sds", "mean"),
             pv_trees_sds=("pv_trees_sds", "mean"),
             pv_ates_sds=("pv_ates_sds", "mean"),
+            pv_ates_grouped_sds=("pv_ates_grouped_sds", "mean"),
+            pv_ates_grouped_oracle_sds=("pv_ates_grouped_oracle_sds", "mean"),
             cate_minus_tree_means=("cate_minus_tree_means", "mean"),
             cate_minus_ate_means=("cate_minus_ate_means", "mean"),
             cate_minus_best_baseline_means=("cate_minus_best_baseline_means", "mean"),
@@ -161,7 +189,7 @@ def collapse_duplicates(df):
     collapsed["cost_misspec"] = collapsed["eval_cost"] - collapsed["tree_train_cost"]
     collapsed["abs_cost_misspec"] = np.abs(collapsed["cost_misspec"])
     collapsed["best_baseline"] = np.where(
-        collapsed["pv_ates_means"] >= collapsed["pv_trees_means"], "ate", "tree"
+        collapsed["pv_ates_grouped_means"] >= collapsed["pv_trees_means"], "ate", "tree"
     )
     n_rows_eff = pd.to_numeric(collapsed["n_rows"], errors="coerce") * pd.to_numeric(
         collapsed["duplicate_count"], errors="coerce"
@@ -176,10 +204,10 @@ def compute_policy_rankings(cost_rows, args):
     df = cost_rows.copy()
 
     df["cate_positive"] = (df["pv_cates_means"] >= args.cate_positive_threshold).astype(float)
-    df["ate_positive"] = (df["pv_ates_means"] >= args.ate_positive_threshold).astype(float)
+    df["ate_positive"] = (df["pv_ates_grouped_means"] >= args.ate_positive_threshold).astype(float)
     df["joint_positive"] = (
         (df["pv_cates_means"] >= args.cate_positive_threshold)
-        & (df["pv_ates_means"] >= args.ate_positive_threshold)
+        & (df["pv_ates_grouped_means"] >= args.ate_positive_threshold)
     ).astype(float)
 
     sweep = (
@@ -216,7 +244,7 @@ def compute_policy_rankings(cost_rows, args):
             "target_cost_distance",
             "pv_trees_means",
             "pv_cates_means",
-            "pv_ates_means",
+            "pv_ates_grouped_means",
             "cate_minus_tree_means",
             "cate_minus_ate_means",
             "cate_minus_best_baseline_means",
@@ -226,7 +254,7 @@ def compute_policy_rankings(cost_rows, args):
             "eval_cost": "tree_target_eval_cost",
             "pv_trees_means": "tree_value_at_target_cost",
             "pv_cates_means": "cate_value_at_target_cost",
-            "pv_ates_means": "ate_value_at_target_cost",
+            "pv_ates_grouped_means": "ate_value_at_target_cost",
             "cate_minus_tree_means": "adv_vs_tree_at_target_cost",
             "cate_minus_ate_means": "adv_vs_ate_at_target_cost",
             "cate_minus_best_baseline_means": "adv_vs_best_at_target_cost",
@@ -343,7 +371,7 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
         plot_specs = [
             ("pv_cates_means", "pv_cates_se", "CATE+postprocess", "#1f77b4"),
             ("pv_trees_means", "pv_trees_se", "Policy tree", "#ff7f0e"),
-            ("pv_ates_means", "pv_ates_se", "ATE all-or-nothing", "#2ca02c"),
+            ("pv_ates_grouped_means", "pv_ates_grouped_se", "ATE grouped (train/test)", "#2ca02c"),
         ]
         for mean_col, se_col, label, color in plot_specs:
             y = pd.to_numeric(series[mean_col], errors="coerce").to_numpy(dtype=float)
@@ -368,9 +396,17 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
         ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
         ax.set_ylabel("Policy value")
         ax.grid(alpha=0.25)
+        run_id_val = int(rank_row["run_id"]) if pd.notna(rank_row["run_id"]) else -1
+        exp_val = str(rank_row["experiment_name"])
+        state_val = str(rank_row["state"])
+        mode_val = str(rank_row["evaluation_mode"])
+        nontrivial_val = bool(rank_row["passes_nontriviality"])
+        joint_pos_val = float(rank_row["joint_positive_share"])
+        tree_target_val = float(rank_row["tree_value_at_target_cost"])
         ax.set_title(
-            f"Rank {int(rank_row['rank'])} | tree_train_cost={rank_row['tree_train_cost']:.4f} | "
-            f"score={rank_row['ranking_score']:.4f} | nontrivial={bool(rank_row['passes_nontriviality'])}"
+            f"Rank {int(rank_row['rank'])} | mode={mode_val} | state={state_val} | exp={exp_val}\n"
+            f"run={run_id_val} | nontrivial={nontrivial_val} | joint_pos={joint_pos_val:.2f} | "
+            f"tree@target={tree_target_val:.4f}"
         )
 
     axes[-1].set_xlabel("Treatment cost")
@@ -383,11 +419,6 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
     fig.savefig(output_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     return output_path
-
-
-def write_csv(df, path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False)
 
 
 def build_parser():
@@ -463,40 +494,21 @@ def main():
     out_dir = Path(args.output_dir)
     prefix = args.output_prefix
 
-    filtered_input_path = out_dir / f"{prefix}_filtered_input_rows.csv"
-    cost_rows_path = out_dir / f"{prefix}_cost_rows_collapsed.csv"
-    rankings_path = out_dir / f"{prefix}_policy_rankings.csv"
-    top_rankings_path = out_dir / f"{prefix}_policy_rankings_top.csv"
-    nontrivial_path = out_dir / f"{prefix}_policy_rankings_nontrivial.csv"
-    top_nontrivial_path = out_dir / f"{prefix}_policy_rankings_nontrivial_top.csv"
-    top_cost_paths_path = out_dir / f"{prefix}_top_policy_cost_paths.csv"
-    top_nontrivial_cost_paths_path = out_dir / f"{prefix}_top_nontrivial_policy_cost_paths.csv"
     top_overall_plot_path = out_dir / f"{prefix}_top_overall_policies.png"
     top_nontrivial_plot_path = out_dir / f"{prefix}_top_nontrivial_policies.png"
-
-    write_csv(summary, filtered_input_path)
-    write_csv(cost_rows, cost_rows_path)
-    write_csv(rankings, rankings_path)
-    write_csv(top_rankings, top_rankings_path)
-    write_csv(nontrivial_rankings, nontrivial_path)
-    write_csv(top_nontrivial, top_nontrivial_path)
-    write_csv(top_cost_paths, top_cost_paths_path)
-    write_csv(top_nontrivial_cost_paths, top_nontrivial_cost_paths_path)
 
     if args.nontrivial_only:
         plot_ranking = top_nontrivial
         plot_cost_paths = top_nontrivial_cost_paths
         plot_output_path = top_nontrivial_plot_path
         plot_title = f"Top {args.plot_top_nontrivial} non-trivial policies"
-        plot_label = "non-trivial"
     else:
         plot_ranking = top_rankings
         plot_cost_paths = top_cost_paths
         plot_output_path = top_overall_plot_path
         plot_title = f"Top {args.plot_top_nontrivial} overall policies"
-        plot_label = "overall"
 
-    plot_path = plot_policy_curves(
+    plot_policy_curves(
         cost_paths=plot_cost_paths,
         ranking=plot_ranking,
         top_n=args.plot_top_nontrivial,
@@ -507,34 +519,6 @@ def main():
     print(f"Filtered input rows: {len(summary)}")
     print(f"Unique policy-cost rows: {len(cost_rows)}")
     print(f"Ranked policies: {len(rankings)}")
-    print(f"Rankings written to: {rankings_path}")
-    print(f"Top rankings written to: {top_rankings_path}")
-    print(f"Non-trivial rankings written to: {nontrivial_path}")
-    print(f"Top non-trivial rankings written to: {top_nontrivial_path}")
-    print(f"Top policy cost paths written to: {top_cost_paths_path}")
-    print(f"Top non-trivial policy cost paths written to: {top_nontrivial_cost_paths_path}")
-    if plot_path is not None:
-        print(f"Top {plot_label} policy plot written to: {plot_path}")
-
-    preview = plot_ranking if not plot_ranking.empty else top_rankings
-    preview_label = plot_label if not plot_ranking.empty else "overall"
-    preview_cols = [
-        "rank",
-        "policy_id",
-        "combined_sweep_advantage",
-        "sum_adv_vs_tree",
-        "sum_adv_vs_ate",
-        "passes_nontriviality",
-        "cate_positive_share",
-        "ate_positive_share",
-        "joint_positive_share",
-        "tree_value_at_target_cost",
-        "tree_target_eval_cost",
-        "target_cost_distance",
-    ]
-    print(f"\nTop 10 {preview_label} policies by integrated sweep score:")
-    print(preview[preview_cols].head(10).to_string(index=False))
-
 
 if __name__ == "__main__":
     main()

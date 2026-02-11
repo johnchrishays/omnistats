@@ -1,0 +1,1 @@
+--experiment-name full_train_debug --states TX --evaluation-modes full,train --train-on-full --train-size 1.0 --n-reps 30 --tree-train-costs 0.05 --cost-grid-start 0.0 --cost-grid-stop 0.1 --cost-grid-num 11

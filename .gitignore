@@ -2,3 +2,7 @@ gerber
 *.pyc
 *.csv
 *.json
+*.out
+*.lock
+*.done
+*.png

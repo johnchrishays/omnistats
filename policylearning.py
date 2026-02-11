@@ -186,6 +186,128 @@ def policy_value_ate(train_ate, eval_ate, cost):
     return 0.0
 
 
+def policy_value_ate_oracle(eval_ate, cost):
+    if not np.isfinite(eval_ate):
+        return np.nan
+    return float(eval_ate - cost) if eval_ate > cost else 0.0
+
+
+def policy_value_ate_grouped(train_cates, eval_cates, cost):
+    train_net_benefit = train_cates["ate"] - cost
+    train_net_benefit = train_net_benefit.fillna(0.0)
+
+    train_subgroup_sizes = train_cates["n_treat"] + train_cates["n_control"]
+    train_total_size = float(train_subgroup_sizes.sum())
+    if train_total_size <= 0:
+        return np.nan
+    train_avg_net_benefit = float((train_net_benefit * train_subgroup_sizes).sum() / train_total_size)
+
+    if train_avg_net_benefit <= 0:
+        return 0.0
+
+    eval_net_benefit = eval_cates["ate"] - cost
+    eval_net_benefit = eval_net_benefit.fillna(0.0)
+    eval_subgroup_sizes = eval_cates["n_treat"] + eval_cates["n_control"]
+    eval_total_size = float(eval_subgroup_sizes.sum())
+    if eval_total_size <= 0:
+        return np.nan
+
+    return float((eval_net_benefit * eval_subgroup_sizes).sum() / eval_total_size)
+
+
+def policy_value_ate_grouped_oracle(eval_cates, cost):
+    net_benefit = eval_cates["ate"] - cost
+    net_benefit = net_benefit.fillna(0.0)
+
+    subgroup_sizes = eval_cates["n_treat"] + eval_cates["n_control"]
+    total_size = float(subgroup_sizes.sum())
+    if total_size <= 0:
+        return np.nan
+
+    avg_net_benefit = float((net_benefit * subgroup_sizes).sum() / total_size)
+    return avg_net_benefit if avg_net_benefit > 0 else 0.0
+
+
+def policy_value_cate_oracle(eval_cates, cost):
+    net_benefit = eval_cates["ate"] - cost
+    net_benefit = net_benefit.fillna(0.0)
+
+    treat_mask = (eval_cates["ate"] - cost) > 0
+    treat_mask = treat_mask.fillna(False)
+
+    subgroup_sizes = eval_cates["n_treat"] + eval_cates["n_control"]
+    total_size = float(subgroup_sizes.sum())
+    if total_size <= 0:
+        return np.nan
+
+    weighted_net_benefit = (net_benefit * treat_mask.astype(float) * subgroup_sizes).sum()
+    return float(weighted_net_benefit / total_size)
+
+
+def policy_value_tree_leaf_oracle(leaf_cates, cost):
+    net_benefit = leaf_cates["ate"] - cost
+    net_benefit = net_benefit.fillna(0.0)
+
+    treat_mask = (leaf_cates["ate"] - cost) > 0
+    treat_mask = treat_mask.fillna(False)
+
+    subgroup_sizes = leaf_cates["n_treat"] + leaf_cates["n_control"]
+    total_size = float(subgroup_sizes.sum())
+    if total_size <= 0:
+        return np.nan
+
+    weighted_net_benefit = (net_benefit * treat_mask.astype(float) * subgroup_sizes).sum()
+    return float(weighted_net_benefit / total_size)
+
+
+def cate_alignment_stats(train_cates, eval_cates, group_vars):
+    train_groups = train_cates[group_vars + ["ate"]].rename(columns={"ate": "train_ate"})
+    eval_groups = eval_cates[group_vars + ["ate", "n_treat", "n_control"]].copy()
+    aligned = eval_groups.merge(train_groups, on=group_vars, how="left", indicator=True)
+
+    subgroup_sizes = (aligned["n_treat"] + aligned["n_control"]).astype(float)
+    total_size = float(subgroup_sizes.sum())
+    unseen_mask = aligned["_merge"] == "left_only"
+    train_ate_nan_mask = aligned["train_ate"].isna()
+    eval_ate_nan_mask = aligned["ate"].isna()
+
+    if total_size <= 0:
+        return {
+            "n_train_cate_groups": int(train_cates.shape[0]),
+            "n_eval_cate_groups": int(eval_cates.shape[0]),
+            "n_overlap_cate_groups": 0,
+            "eval_unseen_cate_group_share_w": np.nan,
+            "eval_train_ate_nan_share_w": np.nan,
+            "eval_eval_ate_nan_share_w": np.nan,
+        }
+
+    n_overlap = int((~unseen_mask).sum())
+    return {
+        "n_train_cate_groups": int(train_cates.shape[0]),
+        "n_eval_cate_groups": int(eval_cates.shape[0]),
+        "n_overlap_cate_groups": n_overlap,
+        "eval_unseen_cate_group_share_w": float((subgroup_sizes * unseen_mask.astype(float)).sum() / total_size),
+        "eval_train_ate_nan_share_w": float((subgroup_sizes * train_ate_nan_mask.astype(float)).sum() / total_size),
+        "eval_eval_ate_nan_share_w": float((subgroup_sizes * eval_ate_nan_mask.astype(float)).sum() / total_size),
+    }
+
+
+def leaf_stats(leaf_cates):
+    subgroup_sizes = (leaf_cates["n_treat"] + leaf_cates["n_control"]).astype(float)
+    total_size = float(subgroup_sizes.sum())
+    ate_nan_mask = leaf_cates["ate"].isna()
+    if total_size <= 0:
+        return {
+            "n_tree_leaves_eval": int(leaf_cates.shape[0]),
+            "leaf_eval_ate_nan_share_w": np.nan,
+        }
+
+    return {
+        "n_tree_leaves_eval": int(leaf_cates.shape[0]),
+        "leaf_eval_ate_nan_share_w": float((subgroup_sizes * ate_nan_mask.astype(float)).sum() / total_size),
+    }
+
+
 def resolve_features(args, df_columns):
     if args.cate_features:
         cate_features = parse_csv_arg(args.cate_features)
@@ -333,8 +455,11 @@ def run_experiment(args):
     tree_train_costs = resolve_tree_train_costs(args)
     tree_kwargs, ignored_tree_kwargs = resolve_tree_kwargs(args)
 
-    if not 0 < args.train_size < 1:
-        raise ValueError("--train-size must be strictly between 0 and 1.")
+    if args.train_size <= 0 or args.train_size > 1:
+        raise ValueError("--train-size must be in (0, 1].")
+    full_train_mode = bool(args.train_on_full or args.train_size >= 1.0)
+    if (not full_train_mode) and args.train_size >= 1.0:
+        raise ValueError("--train-size must be < 1 unless --train-on-full is enabled.")
     if args.n_reps <= 0:
         raise ValueError("--n-reps must be positive.")
 
@@ -357,17 +482,22 @@ def run_experiment(args):
         )
 
         for rep in rep_iterator:
-            split_seed = int(rng.integers(0, 2**31 - 1))
-
-            train_df, holdout_df = train_test_split(
-                df_state,
-                train_size=args.train_size,
-                shuffle=True,
-                random_state=split_seed,
-            )
-
-            train_df = train_df.copy()
-            holdout_df = holdout_df.copy()
+            if full_train_mode:
+                split_seed = -1
+                train_df = df_state.copy()
+                holdout_df = df_state.copy()
+                split_mode = "full_train"
+            else:
+                split_seed = int(rng.integers(0, 2**31 - 1))
+                train_df, holdout_df = train_test_split(
+                    df_state,
+                    train_size=args.train_size,
+                    shuffle=True,
+                    random_state=split_seed,
+                )
+                train_df = train_df.copy()
+                holdout_df = holdout_df.copy()
+                split_mode = "random_split"
 
             train_ate = get_ate(train_df, treatment_var=args.treat_var, outcome_var=args.outcome_var)["ate"]
             train_cates = compute_cate(
@@ -410,12 +540,18 @@ def run_experiment(args):
                     outcome_var=args.outcome_var,
                     treat_var=args.treat_var,
                 )
+                cate_stats = cate_alignment_stats(train_cates, eval_cates, cate_features)
 
                 leaf_cates_by_cost = {}
+                leaf_stats_by_cost = {}
                 for train_cost in tree_train_costs:
                     model = trained_trees[train_cost]
                     if model is None:
                         leaf_cates_by_cost[train_cost] = None
+                        leaf_stats_by_cost[train_cost] = {
+                            "n_tree_leaves_eval": np.nan,
+                            "leaf_eval_ate_nan_share_w": np.nan,
+                        }
                     else:
                         try:
                             leaf_cates_by_cost[train_cost] = get_leaf_cates(
@@ -425,8 +561,13 @@ def run_experiment(args):
                                 outcome_var=args.outcome_var,
                                 treat_var=args.treat_var,
                             )
+                            leaf_stats_by_cost[train_cost] = leaf_stats(leaf_cates_by_cost[train_cost])
                         except Exception as exc:
                             leaf_cates_by_cost[train_cost] = None
+                            leaf_stats_by_cost[train_cost] = {
+                                "n_tree_leaves_eval": np.nan,
+                                "leaf_eval_ate_nan_share_w": np.nan,
+                            }
                             if tree_errors[train_cost] is None:
                                 tree_errors[train_cost] = str(exc)
 
@@ -438,10 +579,24 @@ def run_experiment(args):
                         cost=c,
                     )
                     pv_ate = policy_value_ate(train_ate=train_ate, eval_ate=eval_ate, cost=c)
+                    pv_ate_oracle = policy_value_ate_oracle(eval_ate=eval_ate, cost=c)
+                    pv_ate_grouped = policy_value_ate_grouped(
+                        train_cates=train_cates,
+                        eval_cates=eval_cates,
+                        cost=c,
+                    )
+                    pv_ate_grouped_oracle = policy_value_ate_grouped_oracle(eval_cates=eval_cates, cost=c)
+                    pv_cate_oracle = policy_value_cate_oracle(eval_cates=eval_cates, cost=c)
 
                     for train_cost in tree_train_costs:
                         leaf_cates = leaf_cates_by_cost[train_cost]
                         pv_tree = policy_value_tree(leaf_cates, cost=c) if leaf_cates is not None else np.nan
+                        pv_tree_leaf_oracle = (
+                            policy_value_tree_leaf_oracle(leaf_cates=leaf_cates, cost=c)
+                            if leaf_cates is not None
+                            else np.nan
+                        )
+                        current_leaf_stats = leaf_stats_by_cost[train_cost]
 
                         detailed_rows.append(
                             {
@@ -449,6 +604,7 @@ def run_experiment(args):
                                 "experiment_name": args.experiment_name,
                                 "rep": rep,
                                 "split_seed": split_seed,
+                                "split_mode": split_mode,
                                 "state": state,
                                 "evaluation_mode": eval_mode,
                                 "c": float(c),
@@ -459,10 +615,23 @@ def run_experiment(args):
                                 "pv_cate": pv_cate,
                                 "pv_tree": pv_tree,
                                 "pv_ate": pv_ate,
+                                "pv_ate_oracle": pv_ate_oracle,
+                                "pv_ate_grouped": pv_ate_grouped,
+                                "pv_ate_grouped_oracle": pv_ate_grouped_oracle,
+                                "pv_cate_oracle": pv_cate_oracle,
+                                "pv_tree_leaf_oracle": pv_tree_leaf_oracle,
                                 "train_ate": train_ate,
                                 "eval_ate": eval_ate,
                                 "n_train": int(train_df.shape[0]),
                                 "n_eval": int(eval_df.shape[0]),
+                                "n_train_cate_groups": cate_stats["n_train_cate_groups"],
+                                "n_eval_cate_groups": cate_stats["n_eval_cate_groups"],
+                                "n_overlap_cate_groups": cate_stats["n_overlap_cate_groups"],
+                                "eval_unseen_cate_group_share_w": cate_stats["eval_unseen_cate_group_share_w"],
+                                "eval_train_ate_nan_share_w": cate_stats["eval_train_ate_nan_share_w"],
+                                "eval_eval_ate_nan_share_w": cate_stats["eval_eval_ate_nan_share_w"],
+                                "n_tree_leaves_eval": current_leaf_stats["n_tree_leaves_eval"],
+                                "leaf_eval_ate_nan_share_w": current_leaf_stats["leaf_eval_ate_nan_share_w"],
                                 "tree_error": tree_errors[train_cost],
                             }
                         )
@@ -484,6 +653,21 @@ def run_experiment(args):
             pv_trees_sds=("pv_tree", safe_nanstd),
             pv_ates_means=("pv_ate", safe_nanmean),
             pv_ates_sds=("pv_ate", safe_nanstd),
+            pv_ates_oracle_means=("pv_ate_oracle", safe_nanmean),
+            pv_ates_grouped_means=("pv_ate_grouped", safe_nanmean),
+            pv_ates_grouped_sds=("pv_ate_grouped", safe_nanstd),
+            pv_ates_grouped_oracle_means=("pv_ate_grouped_oracle", safe_nanmean),
+            pv_ates_grouped_oracle_sds=("pv_ate_grouped_oracle", safe_nanstd),
+            pv_cates_oracle_means=("pv_cate_oracle", safe_nanmean),
+            pv_trees_leaf_oracle_means=("pv_tree_leaf_oracle", safe_nanmean),
+            n_train_cate_groups_means=("n_train_cate_groups", safe_nanmean),
+            n_eval_cate_groups_means=("n_eval_cate_groups", safe_nanmean),
+            n_overlap_cate_groups_means=("n_overlap_cate_groups", safe_nanmean),
+            eval_unseen_cate_group_share_w_means=("eval_unseen_cate_group_share_w", safe_nanmean),
+            eval_train_ate_nan_share_w_means=("eval_train_ate_nan_share_w", safe_nanmean),
+            eval_eval_ate_nan_share_w_means=("eval_eval_ate_nan_share_w", safe_nanmean),
+            n_tree_leaves_eval_means=("n_tree_leaves_eval", safe_nanmean),
+            leaf_eval_ate_nan_share_w_means=("leaf_eval_ate_nan_share_w", safe_nanmean),
             n_rows=("pv_cate", "size"),
             n_tree_errors=("tree_error", lambda s: int(s.notna().sum())),
         )
@@ -493,6 +677,25 @@ def run_experiment(args):
     summary["cate_minus_tree_means"] = summary["pv_cates_means"] - summary["pv_trees_means"]
     summary["cate_minus_best_baseline_means"] = summary["pv_cates_means"] - np.maximum(
         summary["pv_ates_means"], summary["pv_trees_means"]
+    )
+    summary["cate_minus_ate_oracle_means"] = summary["pv_cates_means"] - summary["pv_ates_oracle_means"]
+    summary["cate_minus_ate_grouped_means"] = (
+        summary["pv_cates_means"] - summary["pv_ates_grouped_means"]
+    )
+    summary["cate_minus_ate_grouped_oracle_means"] = (
+        summary["pv_cates_means"] - summary["pv_ates_grouped_oracle_means"]
+    )
+    summary["cate_oracle_minus_ate_oracle_means"] = (
+        summary["pv_cates_oracle_means"] - summary["pv_ates_oracle_means"]
+    )
+    summary["cate_oracle_minus_ate_grouped_oracle_means"] = (
+        summary["pv_cates_oracle_means"] - summary["pv_ates_grouped_oracle_means"]
+    )
+    summary["ate_grouped_minus_ate_grouped_oracle_means"] = (
+        summary["pv_ates_grouped_means"] - summary["pv_ates_grouped_oracle_means"]
+    )
+    summary["tree_leaf_oracle_minus_ate_oracle_means"] = (
+        summary["pv_trees_leaf_oracle_means"] - summary["pv_ates_oracle_means"]
     )
     summary["eval_cost"] = summary["c"]
     summary["cost_misspec"] = summary["c"] - summary["tree_train_cost"]
@@ -513,6 +716,7 @@ def run_experiment(args):
     config_payload["resolved_tree_kwargs"] = tree_kwargs
     config_payload["ignored_tree_kwargs"] = ignored_tree_kwargs
     config_payload["resolved_states"] = states
+    config_payload["resolved_full_train_mode"] = full_train_mode
     config_payload["seed_used"] = base_seed
 
     with config_path.open("w", encoding="utf-8") as f:
@@ -551,6 +755,11 @@ def build_arg_parser():
 
     parser.add_argument("--n-reps", type=int, default=500)
     parser.add_argument("--train-size", type=float, default=0.7)
+    parser.add_argument(
+        "--train-on-full",
+        action="store_true",
+        help="Train on 100% of each state sample (train_df == full state sample; holdout mode becomes pseudo-holdout).",
+    )
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--evaluation-modes", type=str, default="holdout,full")
 
