@@ -15,6 +15,12 @@ BASE_REQUIRED_COLS = {
 
 POLICY_GROUP_COLS = ["run_id", "experiment_name", "state", "evaluation_mode", "tree_train_cost"]
 
+SD_SE_SPECS = [
+    ("pv_cates_sds", "pv_cates_se"),
+    ("pv_trees_sds", "pv_trees_se"),
+    ("pv_ates_sds", "pv_ates_se"),
+]
+
 
 def parse_csv_arg(raw):
     if raw is None:
@@ -89,11 +95,17 @@ def ensure_columns(df, args):
         )
     if "n_rows" not in df.columns:
         df["n_rows"] = np.nan
+    for sd_col, _ in SD_SE_SPECS:
+        if sd_col not in df.columns:
+            df[sd_col] = np.nan
 
     if "cost_misspec" not in df.columns:
         df["cost_misspec"] = df["eval_cost"] - df["tree_train_cost"]
     if "abs_cost_misspec" not in df.columns:
         df["abs_cost_misspec"] = np.abs(df["cost_misspec"])
+
+    for sd_col, _ in SD_SE_SPECS:
+        df[sd_col] = pd.to_numeric(df[sd_col], errors="coerce")
 
     df["best_baseline"] = np.where(df["pv_ates_means"] >= df["pv_trees_means"], "ate", "tree")
     return df
@@ -135,6 +147,9 @@ def collapse_duplicates(df):
             pv_cates_means=("pv_cates_means", "mean"),
             pv_trees_means=("pv_trees_means", "mean"),
             pv_ates_means=("pv_ates_means", "mean"),
+            pv_cates_sds=("pv_cates_sds", "mean"),
+            pv_trees_sds=("pv_trees_sds", "mean"),
+            pv_ates_sds=("pv_ates_sds", "mean"),
             cate_minus_tree_means=("cate_minus_tree_means", "mean"),
             cate_minus_ate_means=("cate_minus_ate_means", "mean"),
             cate_minus_best_baseline_means=("cate_minus_best_baseline_means", "mean"),
@@ -148,6 +163,12 @@ def collapse_duplicates(df):
     collapsed["best_baseline"] = np.where(
         collapsed["pv_ates_means"] >= collapsed["pv_trees_means"], "ate", "tree"
     )
+    n_rows_eff = pd.to_numeric(collapsed["n_rows"], errors="coerce") * pd.to_numeric(
+        collapsed["duplicate_count"], errors="coerce"
+    ).fillna(1.0)
+    collapsed["n_rows_eff"] = np.where(n_rows_eff > 0, n_rows_eff, np.nan)
+    for sd_col, se_col in SD_SE_SPECS:
+        collapsed[se_col] = collapsed[sd_col] / np.sqrt(collapsed["n_rows_eff"])
     return collapsed
 
 
@@ -308,7 +329,7 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
         return None
 
     n_panels = len(policy_ids)
-    fig, axes = plt.subplots(n_panels, 1, figsize=(11, 3.8 * n_panels), sharex=True)
+    fig, axes = plt.subplots(n_panels, 1, figsize=(5, 3.8 * n_panels), sharex=True)
     if n_panels == 1:
         axes = [axes]
 
@@ -318,30 +339,30 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
             continue
 
         rank_row = top_ranked[top_ranked["policy_id"] == policy_id].iloc[0]
-        ax.plot(
-            series["eval_cost"],
-            series["pv_cates_means"],
-            marker="o",
-            markersize=3,
-            linewidth=1.5,
-            label="CATE+postprocess",
-        )
-        ax.plot(
-            series["eval_cost"],
-            series["pv_trees_means"],
-            marker="o",
-            markersize=3,
-            linewidth=1.5,
-            label="Policy tree",
-        )
-        ax.plot(
-            series["eval_cost"],
-            series["pv_ates_means"],
-            marker="o",
-            markersize=3,
-            linewidth=1.5,
-            label="ATE all-or-nothing",
-        )
+        x = pd.to_numeric(series["eval_cost"], errors="coerce").to_numpy(dtype=float)
+        plot_specs = [
+            ("pv_cates_means", "pv_cates_se", "CATE+postprocess", "#1f77b4"),
+            ("pv_trees_means", "pv_trees_se", "Policy tree", "#ff7f0e"),
+            ("pv_ates_means", "pv_ates_se", "ATE all-or-nothing", "#2ca02c"),
+        ]
+        for mean_col, se_col, label, color in plot_specs:
+            y = pd.to_numeric(series[mean_col], errors="coerce").to_numpy(dtype=float)
+            ax.plot(
+                x,
+                y,
+                marker="o",
+                markersize=3,
+                linewidth=1.5,
+                color=color,
+                label=label,
+            )
+            if se_col in series.columns:
+                se = pd.to_numeric(series[se_col], errors="coerce").to_numpy(dtype=float)
+                valid = np.isfinite(y) & np.isfinite(se)
+                if valid.any():
+                    lower = y - 1.96 * se
+                    upper = y + 1.96 * se
+                    ax.fill_between(x[valid], lower[valid], upper[valid], color=color, alpha=0.15)
 
         ax.axvline(rank_row["tree_train_cost"], color="gray", linestyle="--", linewidth=1)
         ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
@@ -450,6 +471,7 @@ def main():
     top_nontrivial_path = out_dir / f"{prefix}_policy_rankings_nontrivial_top.csv"
     top_cost_paths_path = out_dir / f"{prefix}_top_policy_cost_paths.csv"
     top_nontrivial_cost_paths_path = out_dir / f"{prefix}_top_nontrivial_policy_cost_paths.csv"
+    top_overall_plot_path = out_dir / f"{prefix}_top_overall_policies.png"
     top_nontrivial_plot_path = out_dir / f"{prefix}_top_nontrivial_policies.png"
 
     write_csv(summary, filtered_input_path)
@@ -461,12 +483,25 @@ def main():
     write_csv(top_cost_paths, top_cost_paths_path)
     write_csv(top_nontrivial_cost_paths, top_nontrivial_cost_paths_path)
 
+    if args.nontrivial_only:
+        plot_ranking = top_nontrivial
+        plot_cost_paths = top_nontrivial_cost_paths
+        plot_output_path = top_nontrivial_plot_path
+        plot_title = f"Top {args.plot_top_nontrivial} non-trivial policies"
+        plot_label = "non-trivial"
+    else:
+        plot_ranking = top_rankings
+        plot_cost_paths = top_cost_paths
+        plot_output_path = top_overall_plot_path
+        plot_title = f"Top {args.plot_top_nontrivial} overall policies"
+        plot_label = "overall"
+
     plot_path = plot_policy_curves(
-        cost_paths=top_nontrivial_cost_paths,
-        ranking=top_nontrivial,
+        cost_paths=plot_cost_paths,
+        ranking=plot_ranking,
         top_n=args.plot_top_nontrivial,
-        output_path=top_nontrivial_plot_path,
-        title_prefix=f"Top {args.plot_top_nontrivial} non-trivial policies",
+        output_path=plot_output_path,
+        title_prefix=plot_title,
     )
 
     print(f"Filtered input rows: {len(summary)}")
@@ -479,10 +514,10 @@ def main():
     print(f"Top policy cost paths written to: {top_cost_paths_path}")
     print(f"Top non-trivial policy cost paths written to: {top_nontrivial_cost_paths_path}")
     if plot_path is not None:
-        print(f"Top non-trivial policy plot written to: {plot_path}")
+        print(f"Top {plot_label} policy plot written to: {plot_path}")
 
-    preview = top_nontrivial if not top_nontrivial.empty else top_rankings
-    preview_label = "non-trivial" if not top_nontrivial.empty else "overall"
+    preview = plot_ranking if not plot_ranking.empty else top_rankings
+    preview_label = plot_label if not plot_ranking.empty else "overall"
     preview_cols = [
         "rank",
         "policy_id",
