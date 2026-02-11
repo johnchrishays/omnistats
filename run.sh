@@ -23,42 +23,6 @@ ARGS=("$@")
 MANIFEST_MODE=0
 MANIFEST_STEM=""
 
-clear_results_csvs_once() {
-  if [[ "${CLEAR_RESULTS_CSVS:-1}" != "1" ]]; then
-    return 0
-  fi
-
-  mkdir -p results
-
-  if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-    local cleanup_lock="results/.cleanup_${SLURM_JOB_ID}.lock"
-    local cleanup_done="results/.cleanup_${SLURM_JOB_ID}.done"
-
-    if command -v flock >/dev/null 2>&1; then
-      (
-        flock 8
-        if [[ ! -f "$cleanup_done" ]]; then
-          find results -type f \( -name "*.csv" -o -name "*.csv.lock" \) -delete
-          rm -rf results/_array_tmp
-          touch "$cleanup_done"
-          echo "Cleared previous CSV outputs for SLURM job ${SLURM_JOB_ID}"
-        fi
-      ) 8>"$cleanup_lock"
-    else
-      if [[ ! -f "$cleanup_done" ]]; then
-        find results -type f \( -name "*.csv" -o -name "*.csv.lock" \) -delete
-        rm -rf results/_array_tmp
-        touch "$cleanup_done"
-        echo "Cleared previous CSV outputs for SLURM job ${SLURM_JOB_ID}"
-      fi
-    fi
-  else
-    find results -type f \( -name "*.csv" -o -name "*.csv.lock" \) -delete
-    rm -rf results/_array_tmp
-    echo "Cleared previous CSV outputs for manual run"
-  fi
-}
-
 append_csv_locked() {
   local src="$1"
   local dst="$2"
@@ -87,8 +51,6 @@ append_csv_locked() {
     fi
   fi
 }
-
-clear_results_csvs_once
 
 # If first arg is a file, treat it as a single shared argument manifest.
 # Every array task runs the same argument set; results are concatenated.
