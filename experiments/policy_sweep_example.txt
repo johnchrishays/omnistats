@@ -1,0 +1,8 @@
+# One experiment per non-comment line.
+# Use with SLURM array:
+# sbatch --array=0-3 run.sh experiments/policy_sweep_example.txt
+
+--experiment-name tx_vote4_depth2 --states TX --cate-feature-set vote4 --policy-feature-set vote4 --n-reps 300 --train-size 0.7 --evaluation-modes holdout,full --tree-max-depth 2 --tree-train-costs 0.02,0.06,0.1,0.14 --cost-grid-start 0.0 --cost-grid-stop 0.2 --cost-grid-num 41 --append-summary-path results/sweeps/policy_sweep_summary.csv --append-detailed-path results/sweeps/policy_sweep_detailed.csv
+--experiment-name tx_vote4_depth4 --states TX --cate-feature-set vote4 --policy-feature-set vote4 --n-reps 300 --train-size 0.7 --evaluation-modes holdout,full --tree-max-depth 4 --tree-train-costs 0.02,0.06,0.1,0.14 --cost-grid-start 0.0 --cost-grid-stop 0.2 --cost-grid-num 41 --append-summary-path results/sweeps/policy_sweep_summary.csv --append-detailed-path results/sweeps/policy_sweep_detailed.csv
+--experiment-name tx_race_gender --states TX --cate-feature-set race_gender --policy-feature-set extended --n-reps 300 --train-size 0.7 --evaluation-modes holdout,full --tree-max-depth 3 --tree-train-costs 0.02,0.06,0.1,0.14 --cost-grid-start 0.0 --cost-grid-stop 0.2 --cost-grid-num 41 --append-summary-path results/sweeps/policy_sweep_summary.csv --append-detailed-path results/sweeps/policy_sweep_detailed.csv
+--experiment-name tx_votehist_extended --states TX --cate-feature-set vote_history --policy-feature-set extended --n-reps 300 --train-size 0.7 --evaluation-modes holdout,full --tree-max-depth 3 --tree-train-costs 0.02,0.06,0.1,0.14 --cost-grid-start 0.0 --cost-grid-stop 0.2 --cost-grid-num 41 --append-summary-path results/sweeps/policy_sweep_summary.csv --append-detailed-path results/sweeps/policy_sweep_detailed.csv
