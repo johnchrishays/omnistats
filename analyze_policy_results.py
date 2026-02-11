@@ -368,13 +368,19 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
 
         rank_row = top_ranked[top_ranked["policy_id"] == policy_id].iloc[0]
         x = pd.to_numeric(series["eval_cost"], errors="coerce").to_numpy(dtype=float)
+        baseline_mean = pd.to_numeric(series["pv_ates_grouped_means"], errors="coerce").to_numpy(dtype=float)
+        baseline_se = (
+            pd.to_numeric(series["pv_ates_grouped_se"], errors="coerce").to_numpy(dtype=float)
+            if "pv_ates_grouped_se" in series.columns
+            else np.full_like(baseline_mean, np.nan)
+        )
         plot_specs = [
             ("pv_cates_means", "pv_cates_se", "CATE+postprocess", "#1f77b4"),
             ("pv_trees_means", "pv_trees_se", "Policy tree", "#ff7f0e"),
-            ("pv_ates_grouped_means", "pv_ates_grouped_se", "ATE grouped (train/test)", "#2ca02c"),
         ]
         for mean_col, se_col, label, color in plot_specs:
-            y = pd.to_numeric(series[mean_col], errors="coerce").to_numpy(dtype=float)
+            y_raw = pd.to_numeric(series[mean_col], errors="coerce").to_numpy(dtype=float)
+            y = y_raw - baseline_mean
             ax.plot(
                 x,
                 y,
@@ -385,7 +391,14 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
                 label=label,
             )
             if se_col in series.columns:
-                se = pd.to_numeric(series[se_col], errors="coerce").to_numpy(dtype=float)
+                current_se = pd.to_numeric(series[se_col], errors="coerce").to_numpy(dtype=float)
+                # Approximate SE for differences assuming independence.
+                se = np.where(
+                    np.isfinite(baseline_se),
+                    np.sqrt(np.square(current_se) + np.square(baseline_se)),
+                    current_se,
+                )
+
                 valid = np.isfinite(y) & np.isfinite(se)
                 if valid.any():
                     lower = y - 1.96 * se
@@ -394,7 +407,7 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
 
         ax.axvline(rank_row["tree_train_cost"], color="gray", linestyle="--", linewidth=1)
         ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
-        ax.set_ylabel("Policy value")
+        ax.set_ylabel("Delta policy value vs grouped ATE")
         ax.grid(alpha=0.25)
         run_id_val = int(rank_row["run_id"]) if pd.notna(rank_row["run_id"]) else -1
         exp_val = str(rank_row["experiment_name"])
@@ -411,7 +424,14 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
 
     axes[-1].set_xlabel("Treatment cost")
     handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.01))
+    fig.legend(
+        handles,
+        labels,
+        loc="upper center",
+        ncol=max(1, min(len(labels), 3)),
+        frameon=False,
+        bbox_to_anchor=(0.5, 1.01),
+    )
     fig.suptitle(title_prefix, y=1.04, fontsize=12)
     fig.tight_layout()
 

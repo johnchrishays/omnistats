@@ -6,4 +6,4 @@
 #   results/sweeps/policy_sweep_example_summary.csv
 #   results/sweeps/policy_sweep_example_detailed.csv
 
---experiment-name tx_vote4_depth4 --states TX --cate-feature-set vote4 --policy-feature-set vote4 --n-reps 30 --train-size 0.7 --evaluation-modes holdout,full --tree-max-depth 4 --tree-train-costs 0.05 --cost-grid-start 0.0 --cost-grid-stop 0.15 --cost-grid-num 16
+--experiment-name tx_vote4_depth4 --states TX --cate-feature-set vote4 --policy-feature-set vote4 --n-reps 50 --train-size 0.7 --evaluation-modes full --tree-max-depth 4 --tree-train-costs 0.05 --cost-grid-start 0.0 --cost-grid-stop 0.15 --cost-grid-num 16
