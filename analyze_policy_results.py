@@ -373,7 +373,7 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
             f"score={rank_row['ranking_score']:.4f} | nontrivial={bool(rank_row['passes_nontriviality'])}"
         )
 
-    axes[-1].set_xlabel("Evaluation cost")
+    axes[-1].set_xlabel("Treatment cost")
     handles, labels = axes[0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False, bbox_to_anchor=(0.5, 1.01))
     fig.suptitle(title_prefix, y=1.04, fontsize=12)
