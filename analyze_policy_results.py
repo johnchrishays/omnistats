@@ -1,4 +1,5 @@
 import argparse
+import csv
 import glob
 from pathlib import Path
 
@@ -13,7 +14,7 @@ BASE_REQUIRED_COLS = {
     "pv_ates_means",
 }
 
-POLICY_GROUP_COLS = ["run_id", "experiment_name", "state", "evaluation_mode", "tree_train_cost"]
+POLICY_GROUP_COLS = ["dataset", "run_id", "experiment_name", "state", "evaluation_mode", "tree_train_cost"]
 
 SD_SE_SPECS = [
     ("pv_cates_sds", "pv_cates_se"),
@@ -29,6 +30,65 @@ def parse_csv_arg(raw):
         return None
     parts = [p.strip() for p in raw.split(",") if p.strip()]
     return parts if parts else None
+
+
+def _read_csv_with_schema_repair(path):
+    """
+    Read CSVs that may have mixed schemas from appended runs.
+    Common case: legacy rows without `dataset` (N columns) plus newer rows with
+    leading `dataset` column (N+1 columns).
+    """
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return pd.DataFrame()
+        rows = list(reader)
+
+    if not rows:
+        return pd.DataFrame(columns=header)
+
+    header_len = len(header)
+    observed = sorted({len(r) for r in rows})
+    if observed == [header_len]:
+        return pd.read_csv(path)
+
+    if (header_len + 1) in observed and "dataset" not in header:
+        repaired_header = ["dataset"] + header
+        repaired_rows = []
+        skipped = 0
+        for row in rows:
+            if len(row) == header_len:
+                repaired_rows.append([""] + row)
+            elif len(row) == header_len + 1:
+                repaired_rows.append(row)
+            else:
+                skipped += 1
+        if skipped:
+            print(f"[warn] Skipped {skipped} malformed rows in {path}")
+        return pd.DataFrame(repaired_rows, columns=repaired_header)
+
+    if (header_len - 1) in observed and "dataset" in header and header and header[0] == "dataset":
+        repaired_rows = []
+        skipped = 0
+        for row in rows:
+            if len(row) == header_len:
+                repaired_rows.append(row)
+            elif len(row) == header_len - 1:
+                repaired_rows.append([""] + row)
+            else:
+                skipped += 1
+        if skipped:
+            print(f"[warn] Skipped {skipped} malformed rows in {path}")
+        return pd.DataFrame(repaired_rows, columns=header)
+
+    # Fallback: best-effort parse, skipping malformed lines.
+    print(
+        f"[warn] Inconsistent CSV schema in {path} (header={header_len}, row_widths={observed}); "
+        "falling back to permissive parser with bad-line skipping."
+    )
+    return pd.read_csv(path, engine="python", on_bad_lines="skip")
 
 
 def load_summary_frames(paths_arg, glob_pattern):
@@ -50,7 +110,7 @@ def load_summary_frames(paths_arg, glob_pattern):
 
     frames = []
     for path in unique_paths:
-        frame = pd.read_csv(path)
+        frame = _read_csv_with_schema_repair(path)
         frame["source_file"] = path
         frames.append(frame)
     return pd.concat(frames, ignore_index=True)
@@ -63,6 +123,8 @@ def ensure_columns(df, args):
 
     if "run_id" not in df.columns:
         df["run_id"] = -1
+    if "dataset" not in df.columns:
+        df["dataset"] = "unknown_dataset"
     if "experiment_name" not in df.columns:
         df["experiment_name"] = "unknown_experiment"
     if "state" not in df.columns:
@@ -141,6 +203,10 @@ def apply_row_filters(df, args):
     states = parse_csv_arg(args.states)
     if states:
         out = out[out["state"].isin(states)]
+
+    datasets = parse_csv_arg(args.datasets)
+    if datasets:
+        out = out[out["dataset"].isin(datasets)]
 
     eval_modes = parse_csv_arg(args.evaluation_modes)
     if eval_modes:
@@ -285,7 +351,9 @@ def compute_policy_rankings(cost_rows, args):
         )
 
     ranking["policy_id"] = (
-        "run="
+        "dataset="
+        + ranking["dataset"].astype(str)
+        + "|run="
         + ranking["run_id"].fillna(-1).astype(int).astype(str)
         + "|exp="
         + ranking["experiment_name"].astype(str)
@@ -319,7 +387,9 @@ def select_top_cost_paths(cost_rows, ranking, top_k):
 
     keyed = cost_rows.copy()
     keyed["policy_id"] = (
-        "run="
+        "dataset="
+        + keyed["dataset"].astype(str)
+        + "|run="
         + keyed["run_id"].fillna(-1).astype(int).astype(str)
         + "|exp="
         + keyed["experiment_name"].astype(str)
@@ -339,7 +409,7 @@ def select_top_cost_paths(cost_rows, ranking, top_k):
     return out.sort_values(["rank", "eval_cost"])
 
 
-def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
+def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix, plot_y_mode):
     if top_n <= 0 or ranking.empty or cost_paths.empty:
         return None
 
@@ -378,9 +448,16 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
             ("pv_cates_means", "pv_cates_se", "CATE+postprocess", "#1f77b4"),
             ("pv_trees_means", "pv_trees_se", "Policy tree", "#ff7f0e"),
         ]
+        if plot_y_mode == "absolute":
+            plot_specs.append(
+                ("pv_ates_grouped_means", "pv_ates_grouped_se", "ATE grouped (train/test)", "#2ca02c")
+            )
         for mean_col, se_col, label, color in plot_specs:
             y_raw = pd.to_numeric(series[mean_col], errors="coerce").to_numpy(dtype=float)
-            y = y_raw - baseline_mean
+            if plot_y_mode == "delta_ate":
+                y = y_raw - baseline_mean
+            else:
+                y = y_raw
             ax.plot(
                 x,
                 y,
@@ -392,12 +469,15 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
             )
             if se_col in series.columns:
                 current_se = pd.to_numeric(series[se_col], errors="coerce").to_numpy(dtype=float)
-                # Approximate SE for differences assuming independence.
-                se = np.where(
-                    np.isfinite(baseline_se),
-                    np.sqrt(np.square(current_se) + np.square(baseline_se)),
-                    current_se,
-                )
+                if plot_y_mode == "delta_ate":
+                    # Approximate SE for differences assuming independence.
+                    se = np.where(
+                        np.isfinite(baseline_se),
+                        np.sqrt(np.square(current_se) + np.square(baseline_se)),
+                        current_se,
+                    )
+                else:
+                    se = current_se
 
                 valid = np.isfinite(y) & np.isfinite(se)
                 if valid.any():
@@ -406,10 +486,15 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
                     ax.fill_between(x[valid], lower[valid], upper[valid], color=color, alpha=0.15)
 
         ax.axvline(rank_row["tree_train_cost"], color="gray", linestyle="--", linewidth=1)
-        ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
-        ax.set_ylabel("Delta policy value vs grouped ATE")
+        if plot_y_mode == "delta_ate":
+            ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
+            ax.set_ylabel("Delta policy value vs grouped ATE")
+        else:
+            ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
+            ax.set_ylabel("Policy value")
         ax.grid(alpha=0.25)
         run_id_val = int(rank_row["run_id"]) if pd.notna(rank_row["run_id"]) else -1
+        dataset_val = str(rank_row["dataset"])
         exp_val = str(rank_row["experiment_name"])
         state_val = str(rank_row["state"])
         mode_val = str(rank_row["evaluation_mode"])
@@ -417,9 +502,9 @@ def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix):
         joint_pos_val = float(rank_row["joint_positive_share"])
         tree_target_val = float(rank_row["tree_value_at_target_cost"])
         ax.set_title(
-            f"Rank {int(rank_row['rank'])} | mode={mode_val} | state={state_val} | exp={exp_val}\n"
+            f"Rank {int(rank_row['rank'])} | dataset={dataset_val} | mode={mode_val} | state={state_val}\n"
             f"run={run_id_val} | nontrivial={nontrivial_val} | joint_pos={joint_pos_val:.2f} | "
-            f"tree@target={tree_target_val:.4f}"
+            f"exp={exp_val} | tree@target={tree_target_val:.4f}"
         )
 
     axes[-1].set_xlabel("Treatment cost")
@@ -463,6 +548,7 @@ def build_parser():
     parser.add_argument("--top-k-cost-paths", type=int, default=10)
 
     parser.add_argument("--states", type=str, default=None)
+    parser.add_argument("--datasets", type=str, default=None)
     parser.add_argument("--evaluation-modes", type=str, default=None)
     parser.add_argument("--experiment-names", type=str, default=None)
     parser.add_argument("--run-ids", type=str, default=None)
@@ -481,6 +567,13 @@ def build_parser():
     parser.add_argument("--nontriviality-penalty", type=float, default=0.0)
     parser.add_argument("--nontrivial-only", action="store_true")
     parser.add_argument("--plot-top-nontrivial", type=int, default=3)
+    parser.add_argument(
+        "--plot-y-mode",
+        type=str,
+        choices=["delta_ate", "absolute"],
+        default="delta_ate",
+        help="Plot either policy value deltas vs grouped ATE, or absolute policy values.",
+    )
     return parser
 
 
@@ -516,17 +609,20 @@ def main():
 
     top_overall_plot_path = out_dir / f"{prefix}_top_overall_policies.png"
     top_nontrivial_plot_path = out_dir / f"{prefix}_top_nontrivial_policies.png"
+    plot_mode_label = (
+        "delta vs grouped ATE" if args.plot_y_mode == "delta_ate" else "absolute policy value"
+    )
 
     if args.nontrivial_only:
         plot_ranking = top_nontrivial
         plot_cost_paths = top_nontrivial_cost_paths
         plot_output_path = top_nontrivial_plot_path
-        plot_title = f"Top {args.plot_top_nontrivial} non-trivial policies"
+        plot_title = f"Top {args.plot_top_nontrivial} non-trivial policies ({plot_mode_label})"
     else:
         plot_ranking = top_rankings
         plot_cost_paths = top_cost_paths
         plot_output_path = top_overall_plot_path
-        plot_title = f"Top {args.plot_top_nontrivial} overall policies"
+        plot_title = f"Top {args.plot_top_nontrivial} overall policies ({plot_mode_label})"
 
     plot_policy_curves(
         cost_paths=plot_cost_paths,
@@ -534,6 +630,7 @@ def main():
         top_n=args.plot_top_nontrivial,
         output_path=plot_output_path,
         title_prefix=plot_title,
+        plot_y_mode=args.plot_y_mode,
     )
 
     print(f"Filtered input rows: {len(summary)}")

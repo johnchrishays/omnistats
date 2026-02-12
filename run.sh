@@ -9,8 +9,9 @@
 #SBATCH --time=4:00:00
 #SBATCH --mem-per-cpu=16G
 #SBATCH --mail-type=ERROR,END
-#SBATCH --mail-user=jhays@mit.edu
 #SBATCH --array=0-6
+
+## # SBATCH --mail-user=jhays@mit.edu
 
 set -euo pipefail
 
