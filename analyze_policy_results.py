@@ -242,9 +242,9 @@ def _study_title(dataset_name):
 
 def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
     modes = [("holdout", "Holdout"), ("full", "Full Information")]
-    fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.2), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(7, 4.2), sharey=True)
 
-    y_label = "Policy Value" if y_mode == "absolute" else "Policy Value (relative to grouped ATE)"
+    y_label = "Policy Value" if y_mode == "absolute" else "Policy Value Difference"
 
     for ax, (mode, panel_label) in zip(axes, modes):
         sub = rows[rows["evaluation_mode"] == mode].sort_values("c")
@@ -273,6 +273,16 @@ def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
         tree_se = sub["plot_tree_se"].to_numpy(dtype=float)
         ate_se = sub["plot_ate_se"].to_numpy(dtype=float)
 
+        if train_costs:
+            ax.axvline(
+                float(train_costs[0]),
+                color="gray",
+                linestyle="--",
+                linewidth=1.3,
+                label="Target cost",
+            )
+        ax.axhline(0.0, color="black", linewidth=1.0)
+
         ax.plot(x, cate_y, color=DEFAULT_PALETTE[0], linewidth=2.2, label="CATE + postprocess")
         _plot_band(ax, x, cate_y, cate_se, color=DEFAULT_PALETTE[0])
 
@@ -283,15 +293,6 @@ def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
             ax.plot(x, ate_y, color=DEFAULT_PALETTE[2], linewidth=2.0, linestyle="--", label="Grouped ATE")
             _plot_band(ax, x, ate_y, ate_se, color=DEFAULT_PALETTE[2], alpha=0.12)
 
-        if train_costs:
-            ax.axvline(
-                float(train_costs[0]),
-                color=DEFAULT_PALETTE[3],
-                linestyle=":",
-                linewidth=1.3,
-                label="Tree train cost",
-            )
-        ax.axhline(0.0, color="0.5", linewidth=1.0)
 
     axes[0].set_ylabel(y_label)
 
@@ -307,7 +308,7 @@ def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
         fig.legend(dedup.values(), dedup.keys(), loc="lower center", ncol=4, fontsize=9)
 
     fig.suptitle(_study_title(dataset_name), fontsize=14)
-    fig.tight_layout(rect=[0, 0.08, 1, 0.92])
+    fig.tight_layout(rect=[0, 0.08, 1, 1])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi)
     plt.close(fig)
