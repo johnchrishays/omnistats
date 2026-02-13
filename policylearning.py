@@ -23,8 +23,8 @@ DATASET_PRESETS = {
         "treat_var": "treat",
         "outcome_var": "voted14",
         "subset_query": None,
-        "cate_feature_set": "ate_matched",
-        "policy_feature_set": None,
+        "cate_feature_set": "cate_gerber",
+        "policy_feature_set": "policy_gerber",
         "inject_state_column": False,
     },
     "nsw": {
@@ -34,26 +34,19 @@ DATASET_PRESETS = {
         "treat_var": "treated",
         "outcome_var": "re78",
         "subset_query": "sample == 1",
-        "drop_columns": ["dwincl", "early_ra", "nodegree"],
-        "cate_feature_set": ALL_FEATURE_SET,
-        "policy_feature_set": ALL_FEATURE_SET,
+        "cate_feature_set": "cate_nsw",
+        "policy_feature_set": "cate_nsw",
         "inject_state_column": True,
     },
 }
 
 FEATURE_PRESETS = {
-    "vote4": ["voted06", "voted08", "voted10", "voted12"],
-    "race_gender": ["d_race_b", "d_race_h", "d_race_o", "d_race_w", "d_female", "d_notfem"],
-    "vote_history": ["voted06", "voted08", "voted09", "voted10", "voted11", "voted12", "voted13"],
-    "extended": [
-        "voted06", "voted08", "voted09", "voted10", "voted11", "voted12", "voted13", "i_age",
-        "age_miss", "age2", "flag_hhid_mult_hhid", "flag_hhid_mult_z", "flag_drop_hhid",
-        "vote_hist", "state_median", "vh_stratum", "vhblw", "vhavg", "vhabv", "d_married",
-        "d_unmarried", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4",
-    ],
-    "ate_matched": ["i_age", "flag_hhid_mult_hhid", "flag_hhid_mult_z", "flag_drop_hhid",
-        "vote_hist", "state_median", "vh_stratum", "vhblw", "d_married",
-        "d_unmarried", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4"]
+    "cate_gerber": ["i_age", "flag_hhid_mult_hhid", "flag_hhid_mult_z", "flag_drop_hhid",
+        "vote_hist", "vh_stratum", "vhblw", "d_married",
+        "d_unmarried", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4"],
+    "policy_gerber": ["d_married", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4","d_race_b", "d_race_h", "d_race_o", "d_race_w", "d_female", "d_notfem"],
+    "cate_nsw": ['age', 'educ', 'black', 'married','hisp',  're74', 're75'],
+    "policy_nsw": ['age', 'educ', 'black', 'married','hisp', 'nodegree',  're74', 're75']
 }
 FEATURE_SET_CHOICES = sorted(list(FEATURE_PRESETS.keys()) + [ALL_FEATURE_SET])
 
@@ -209,26 +202,26 @@ def get_policy_tree(df, policy_features, cost, outcome_var, treat_var, tree_kwar
     Y = df[outcome_var] - cost
 
     resolved_tree_kwargs = dict(tree_kwargs)
-    if use_forest_nuisance:
-        nuisance_random_state = resolved_tree_kwargs.get("random_state")
-        resolved_tree_kwargs.setdefault(
-            "model_propensity",
-            RandomForestClassifier(
-                n_estimators=300,
-                min_samples_leaf=5,
-                random_state=nuisance_random_state,
-                n_jobs=1,
-            ),
-        )
-        resolved_tree_kwargs.setdefault(
-            "model_regression",
-            RandomForestRegressor(
-                n_estimators=300,
-                min_samples_leaf=5,
-                random_state=nuisance_random_state,
-                n_jobs=1,
-            ),
-        )
+    # if use_forest_nuisance:
+    #     nuisance_random_state = resolved_tree_kwargs.get("random_state")
+    #     resolved_tree_kwargs.setdefault(
+    #         "model_propensity",
+    #         RandomForestClassifier(
+    #             n_estimators=300,
+    #             min_samples_leaf=5,
+    #             random_state=nuisance_random_state,
+    #             n_jobs=1,
+    #         ),
+    #     )
+    #     resolved_tree_kwargs.setdefault(
+    #         "model_regression",
+    #         RandomForestRegressor(
+    #             n_estimators=300,
+    #             min_samples_leaf=5,
+    #             random_state=nuisance_random_state,
+    #             n_jobs=1,
+    #         ),
+    #     )
 
     model = DRPolicyTree(**resolved_tree_kwargs)
     model.fit(Y, T, X=X)
@@ -549,9 +542,9 @@ def run_experiment(args):
             default_policy_feature_set=dataset_cfg["default_policy_feature_set"],
         )
         selected_feature_union = list(dict.fromkeys(raw_cate_features + raw_policy_features))
-        df, feature_map, binarization_metadata = build_binary_feature_matrix(df, selected_feature_union)
+        full_bin_df, feature_map, binarization_metadata = build_binary_feature_matrix(df, selected_feature_union)
         cate_features = [feature_map[col] for col in raw_cate_features]
-        policy_features = [feature_map[col] for col in raw_policy_features]
+        policy_features = raw_policy_features # [feature_map[col] for col in raw_policy_features]
 
         resolved_dataset_runs.append(
             {
@@ -591,6 +584,8 @@ def run_experiment(args):
                     shuffle=True,
                     random_state=split_seed,
                 )
+                bin_train_df, _, _ = build_binary_feature_matrix(train_df, selected_feature_union)
+                bin_holdout_df, _, _ = build_binary_feature_matrix(holdout_df, selected_feature_union)
                 train_df = train_df.copy()
                 holdout_df = holdout_df.copy()
             else:
@@ -604,8 +599,10 @@ def run_experiment(args):
                         "evaluation_mode": "holdout",
                         "split_mode": "random_split",
                         "split_seed": split_seed,
-                        "train_df": train_df,
-                        "eval_df": holdout_df,
+                        "train_df": bin_train_df,
+                        "eval_df": bin_holdout_df,
+                        "nonbin_train_df": train_df,
+                        "nonbin_eval_df": holdout_df,
                     }
                 )
             if "full" in eval_modes:
@@ -614,8 +611,10 @@ def run_experiment(args):
                         "evaluation_mode": "full",
                         "split_mode": "full_information",
                         "split_seed": -1,
-                        "train_df": df,
-                        "eval_df": df,
+                        "train_df": full_bin_df,
+                        "eval_df": full_bin_df,
+                        "nonbin_train_df": df,
+                        "nonbin_eval_df": df,
                     }
                 )
 
@@ -634,7 +633,7 @@ def run_experiment(args):
 
                 try:
                     trained_tree = get_policy_tree(
-                        scenario["train_df"],
+                        scenario["nonbin_train_df"],
                         policy_features=policy_features,
                         cost=tree_train_cost,
                         outcome_var=outcome_var,
@@ -661,7 +660,7 @@ def run_experiment(args):
                     if trained_tree is not None:
                         leaf_cates = get_leaf_cates(
                             trained_tree,
-                            eval_df,
+                            scenario["nonbin_eval_df"],
                             policy_features=policy_features,
                             outcome_var=outcome_var,
                             treat_var=treat_var,
@@ -787,7 +786,7 @@ def build_arg_parser():
     parser.add_argument("--policy-feature-set", type=str, choices=FEATURE_SET_CHOICES, default=None)
     parser.add_argument("--policy-features", type=str, default=None)
 
-    parser.add_argument("--n-reps", type=int, default=500)
+    parser.add_argument("--n-reps", type=int, default=50)
     parser.add_argument("--train-size", type=float, default=0.7)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument(

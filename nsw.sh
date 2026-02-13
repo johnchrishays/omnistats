@@ -8,7 +8,6 @@
 #SBATCH -e "logs/nsw-%a.out"
 #SBATCH --time=4:00:00
 #SBATCH --mem-per-cpu=16G
-#SBATCH --mail-type=ERROR,END
 #SBATCH --array=0-19
 
 set -euo pipefail
@@ -22,11 +21,11 @@ mkdir -p "$OUT_DIR"
 
 python3 "$PROJECT_DIR/policylearning.py" \
   --dataset nsw \
-  --n-reps 50 \
+  --n-reps 30 \
   --train-size 0.7 \
   --evaluation-modes holdout,full \
   --tree-max-depth 4 \
-  --tree-train-cost 900 \
+  --tree-train-cost 600 \
   --cost-grid-start 0.0 \
   --cost-grid-stop 1800 \
   --cost-grid-num 21 \

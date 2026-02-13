@@ -248,7 +248,8 @@ def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
 
     for ax, (mode, panel_label) in zip(axes, modes):
         sub = rows[rows["evaluation_mode"] == mode].sort_values("c")
-        ax.set_xlabel(f"Treatment cost ({panel_label})")
+        ax.set_title(panel_label)
+        ax.set_xlabel(f"Treatment cost")
         ax.grid(alpha=0.22)
 
         if sub.empty:
@@ -335,7 +336,7 @@ def build_arg_parser():
     parser.add_argument(
         "--summary-glob",
         type=str,
-        default=None,
+        default="results/_array_tmp/gerber/summary_*.csv,results/_array_tmp/nsw/summary_*.csv",
         help="Comma-separated glob patterns for summary CSVs (e.g. results/_array_tmp/gerber/summary_*.csv).",
     )
     parser.add_argument("--output-dir", type=str, default="results/analysis")

@@ -28,7 +28,7 @@ Array tasks write per-task outputs here:
 python3 analyze_policy_results.py \
   --summary-glob 'results/_array_tmp/gerber/summary_*.csv,results/_array_tmp/nsw/summary_*.csv' \
   --output-dir results/analysis \
-  --output-prefix dataset_comparison
+  --plot-y-mode absolute
 ```
 
 ## Clear analysis in preparation for a new training run
