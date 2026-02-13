@@ -6,6 +6,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 
 
 REQUIRED_SUMMARY_COLUMNS = {
@@ -25,12 +26,31 @@ REQUIRED_SUMMARY_COLUMNS = {
     "n_rows",
 }
 
+STUDY_TITLES = {
+    "gerber": "Social Pressure",
+    "nsw": "National Supported Work Demonstration",
+}
+
+# Keep seaborn's default color cycle accessible for reuse in future plots.
+DEFAULT_PALETTE = sns.color_palette("Set2")
+
 
 def parse_csv_arg(raw):
     if raw is None:
         return None
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values if values else None
+
+
+def configure_plot_style():
+    sns.set_theme(style="whitegrid", palette=DEFAULT_PALETTE)
+    plt.rcParams.update(
+        {
+            "font.family": "serif",
+            "font.serif": ["Computer Modern Roman", "CMU Serif", "DejaVu Serif"],
+            "mathtext.fontset": "cm",
+        }
+    )
 
 
 def resolve_summary_paths(path_arg, glob_arg):
@@ -183,7 +203,7 @@ def add_standard_errors(df):
 def add_plot_columns(df, y_mode):
     out = df.copy()
 
-    if y_mode == "delta_ate":
+    if y_mode == "relative":
         out["plot_cate"] = out["pv_cates_means"] - out["pv_ates_grouped_means"]
         out["plot_tree"] = out["pv_trees_means"] - out["pv_ates_grouped_means"]
         out["plot_ate"] = 0.0
@@ -215,15 +235,20 @@ def _slugify(name):
     return slug or "dataset"
 
 
-def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
-    modes = [("holdout", "holdout"), ("full", "full information")]
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), sharey=True)
+def _study_title(dataset_name):
+    key = str(dataset_name).strip().lower()
+    return STUDY_TITLES.get(key, str(dataset_name))
 
-    y_label = "Policy Value" if y_mode == "absolute" else "Policy Value (Delta vs grouped ATE)"
+
+def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
+    modes = [("holdout", "Holdout"), ("full", "Full Information")]
+    fig, axes = plt.subplots(1, 2, figsize=(8.6, 4.2), sharey=True)
+
+    y_label = "Policy Value" if y_mode == "absolute" else "Policy Value (relative to grouped ATE)"
 
     for ax, (mode, panel_label) in zip(axes, modes):
         sub = rows[rows["evaluation_mode"] == mode].sort_values("c")
-        ax.set_xlabel(f"Evaluation cost ({panel_label})")
+        ax.set_xlabel(f"Treatment cost ({panel_label})")
         ax.grid(alpha=0.22)
 
         if sub.empty:
@@ -247,25 +272,25 @@ def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
         tree_se = sub["plot_tree_se"].to_numpy(dtype=float)
         ate_se = sub["plot_ate_se"].to_numpy(dtype=float)
 
-        ax.plot(x, cate_y, color="#0b6e4f", linewidth=2.2, label="CATE + postprocess")
-        _plot_band(ax, x, cate_y, cate_se, color="#0b6e4f")
+        ax.plot(x, cate_y, color=DEFAULT_PALETTE[0], linewidth=2.2, label="CATE + postprocess")
+        _plot_band(ax, x, cate_y, cate_se, color=DEFAULT_PALETTE[0])
 
-        ax.plot(x, tree_y, color="#c1121f", linewidth=2.2, label="Policy tree")
-        _plot_band(ax, x, tree_y, tree_se, color="#c1121f")
+        ax.plot(x, tree_y, color=DEFAULT_PALETTE[1], linewidth=2.2, label="Policy tree")
+        _plot_band(ax, x, tree_y, tree_se, color=DEFAULT_PALETTE[1])
 
         if y_mode == "absolute":
-            ax.plot(x, ate_y, color="#4a4e69", linewidth=2.0, linestyle="--", label="Grouped ATE")
-            _plot_band(ax, x, ate_y, ate_se, color="#4a4e69", alpha=0.12)
+            ax.plot(x, ate_y, color=DEFAULT_PALETTE[2], linewidth=2.0, linestyle="--", label="Grouped ATE")
+            _plot_band(ax, x, ate_y, ate_se, color=DEFAULT_PALETTE[2], alpha=0.12)
 
         if train_costs:
             ax.axvline(
                 float(train_costs[0]),
-                color="#6c757d",
+                color=DEFAULT_PALETTE[3],
                 linestyle=":",
                 linewidth=1.3,
                 label="Tree train cost",
             )
-        ax.axhline(0.0, color="#adb5bd", linewidth=1.0)
+        ax.axhline(0.0, color="0.5", linewidth=1.0)
 
     axes[0].set_ylabel(y_label)
 
@@ -280,7 +305,7 @@ def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
     if dedup:
         fig.legend(dedup.values(), dedup.keys(), loc="lower center", ncol=4, fontsize=9)
 
-    fig.suptitle(str(dataset_name), fontsize=14)
+    fig.suptitle(_study_title(dataset_name), fontsize=14)
     fig.tight_layout(rect=[0, 0.08, 1, 0.92])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=dpi)
@@ -293,7 +318,10 @@ def make_plots(plot_rows, y_mode, output_dir, output_prefix, dpi):
     datasets = sorted(plot_rows["dataset"].astype(str).unique().tolist())
     for dataset_name in datasets:
         rows = plot_rows[plot_rows["dataset"].astype(str) == dataset_name].copy()
-        output_path = output_dir / f"{output_prefix}_{_slugify(dataset_name)}_holdout_vs_full.png"
+        if output_prefix == "":
+            output_path = output_dir / f"{_slugify(dataset_name)}.png"
+        else:
+            output_path = output_dir / f"{output_prefix}_{_slugify(dataset_name)}.png"
         saved = make_dataset_plot(rows, dataset_name, y_mode=y_mode, output_path=output_path, dpi=dpi)
         output_paths.append(saved)
     return output_paths
@@ -311,7 +339,7 @@ def build_arg_parser():
         help="Comma-separated glob patterns for summary CSVs (e.g. results/_array_tmp/gerber/summary_*.csv).",
     )
     parser.add_argument("--output-dir", type=str, default="results/analysis")
-    parser.add_argument("--output-prefix", type=str, default="policy_compare")
+    parser.add_argument("--output-prefix", type=str, default="")
 
     parser.add_argument("--datasets", type=str, default=None, help="Optional dataset filter.")
     parser.add_argument("--states", type=str, default=None, help="Optional state/group filter.")
@@ -326,8 +354,8 @@ def build_arg_parser():
     parser.add_argument(
         "--plot-y-mode",
         type=str,
-        choices=["delta_ate", "absolute"],
-        default="delta_ate",
+        choices=["relative", "absolute"],
+        default="relative",
         help="Plot delta vs grouped ATE or absolute policy values.",
     )
     parser.add_argument("--dpi", type=int, default=200)
@@ -337,6 +365,7 @@ def build_arg_parser():
 def main(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    configure_plot_style()
 
     summary, input_paths = load_summaries(args.summary_paths, args.summary_glob)
     summary = apply_filters(summary, args)

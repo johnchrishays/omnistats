@@ -23,7 +23,7 @@ DATASET_PRESETS = {
         "treat_var": "treat",
         "outcome_var": "voted14",
         "subset_query": None,
-        "cate_feature_set": "vote4",
+        "cate_feature_set": "ate_matched",
         "policy_feature_set": None,
         "inject_state_column": False,
     },
@@ -34,7 +34,7 @@ DATASET_PRESETS = {
         "treat_var": "treated",
         "outcome_var": "re78",
         "subset_query": "sample == 1",
-        "drop_columns": ["dwincl", "early_ra"],
+        "drop_columns": ["dwincl", "early_ra", "nodegree"],
         "cate_feature_set": ALL_FEATURE_SET,
         "policy_feature_set": ALL_FEATURE_SET,
         "inject_state_column": True,
@@ -51,6 +51,9 @@ FEATURE_PRESETS = {
         "vote_hist", "state_median", "vh_stratum", "vhblw", "vhavg", "vhabv", "d_married",
         "d_unmarried", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4",
     ],
+    "ate_matched": ["i_age", "flag_hhid_mult_hhid", "flag_hhid_mult_z", "flag_drop_hhid",
+        "vote_hist", "state_median", "vh_stratum", "vhblw", "d_married",
+        "d_unmarried", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4"]
 }
 FEATURE_SET_CHOICES = sorted(list(FEATURE_PRESETS.keys()) + [ALL_FEATURE_SET])
 
