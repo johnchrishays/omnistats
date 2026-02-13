@@ -1,641 +1,378 @@
 import argparse
-import csv
 import glob
+import re
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 
-BASE_REQUIRED_COLS = {
+REQUIRED_SUMMARY_COLUMNS = {
+    "dataset",
+    "run_id",
+    "experiment_name",
+    "state",
+    "evaluation_mode",
     "c",
+    "tree_train_cost",
     "pv_cates_means",
+    "pv_cates_sds",
     "pv_trees_means",
-    "pv_ates_means",
+    "pv_trees_sds",
+    "pv_ates_grouped_means",
+    "pv_ates_grouped_sds",
+    "n_rows",
 }
-
-POLICY_GROUP_COLS = ["dataset", "run_id", "experiment_name", "state", "evaluation_mode", "tree_train_cost"]
-
-SD_SE_SPECS = [
-    ("pv_cates_sds", "pv_cates_se"),
-    ("pv_trees_sds", "pv_trees_se"),
-    ("pv_ates_sds", "pv_ates_se"),
-    ("pv_ates_grouped_sds", "pv_ates_grouped_se"),
-    ("pv_ates_grouped_oracle_sds", "pv_ates_grouped_oracle_se"),
-]
 
 
 def parse_csv_arg(raw):
     if raw is None:
         return None
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    return parts if parts else None
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return values if values else None
 
 
-def _read_csv_with_schema_repair(path):
-    """
-    Read CSVs that may have mixed schemas from appended runs.
-    Common case: legacy rows without `dataset` (N columns) plus newer rows with
-    leading `dataset` column (N+1 columns).
-    """
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        try:
-            header = next(reader)
-        except StopIteration:
-            return pd.DataFrame()
-        rows = list(reader)
+def resolve_summary_paths(path_arg, glob_arg):
+    explicit_paths = parse_csv_arg(path_arg) or []
+    glob_patterns = parse_csv_arg(glob_arg) or []
 
-    if not rows:
-        return pd.DataFrame(columns=header)
+    resolved = []
+    for path_str in explicit_paths:
+        resolved.append(Path(path_str))
+    for pattern in glob_patterns:
+        matches = [Path(p) for p in sorted(glob.glob(pattern))]
+        if not matches:
+            raise FileNotFoundError(f"--summary-glob matched no files: {pattern}")
+        resolved.extend(matches)
 
-    header_len = len(header)
-    observed = sorted({len(r) for r in rows})
-    if observed == [header_len]:
-        return pd.read_csv(path)
+    if not resolved:
+        raise ValueError("Provide --summary-paths and/or --summary-glob with at least one file.")
 
-    if (header_len + 1) in observed and "dataset" not in header:
-        repaired_header = ["dataset"] + header
-        repaired_rows = []
-        skipped = 0
-        for row in rows:
-            if len(row) == header_len:
-                repaired_rows.append([""] + row)
-            elif len(row) == header_len + 1:
-                repaired_rows.append(row)
-            else:
-                skipped += 1
-        if skipped:
-            print(f"[warn] Skipped {skipped} malformed rows in {path}")
-        return pd.DataFrame(repaired_rows, columns=repaired_header)
-
-    if (header_len - 1) in observed and "dataset" in header and header and header[0] == "dataset":
-        repaired_rows = []
-        skipped = 0
-        for row in rows:
-            if len(row) == header_len:
-                repaired_rows.append(row)
-            elif len(row) == header_len - 1:
-                repaired_rows.append([""] + row)
-            else:
-                skipped += 1
-        if skipped:
-            print(f"[warn] Skipped {skipped} malformed rows in {path}")
-        return pd.DataFrame(repaired_rows, columns=header)
-
-    # Fallback: best-effort parse, skipping malformed lines.
-    print(
-        f"[warn] Inconsistent CSV schema in {path} (header={header_len}, row_widths={observed}); "
-        "falling back to permissive parser with bad-line skipping."
-    )
-    return pd.read_csv(path, engine="python", on_bad_lines="skip")
-
-
-def load_summary_frames(paths_arg, glob_pattern):
-    paths = []
-    if paths_arg:
-        paths.extend(parse_csv_arg(paths_arg))
-    if glob_pattern:
-        paths.extend(sorted(glob.glob(glob_pattern)))
-
+    unique = []
     seen = set()
-    unique_paths = []
-    for path in paths:
-        if path not in seen:
-            unique_paths.append(path)
-            seen.add(path)
+    for path in resolved:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
 
-    if not unique_paths:
-        raise ValueError("No summary files found. Pass --summary-paths and/or --summary-glob.")
+
+def load_summaries(path_arg, glob_arg):
+    paths = resolve_summary_paths(path_arg, glob_arg)
 
     frames = []
-    for path in unique_paths:
-        frame = _read_csv_with_schema_repair(path)
-        frame["source_file"] = path
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Summary CSV not found: {path}")
+        frame = pd.read_csv(path)
+        frame["_source_path"] = str(path)
         frames.append(frame)
-    return pd.concat(frames, ignore_index=True)
 
-
-def ensure_columns(df, args):
-    missing = sorted(BASE_REQUIRED_COLS - set(df.columns))
+    summary = pd.concat(frames, ignore_index=True)
+    missing = sorted(REQUIRED_SUMMARY_COLUMNS - set(summary.columns))
     if missing:
-        raise ValueError(f"Missing required summary columns: {missing}")
-
-    if "run_id" not in df.columns:
-        df["run_id"] = -1
-    if "dataset" not in df.columns:
-        df["dataset"] = "unknown_dataset"
-    if "experiment_name" not in df.columns:
-        df["experiment_name"] = "unknown_experiment"
-    if "state" not in df.columns:
-        df["state"] = "unknown_state"
-    if "evaluation_mode" not in df.columns:
-        df["evaluation_mode"] = args.default_evaluation_mode
-    if "tree_train_cost" not in df.columns:
-        df["tree_train_cost"] = args.default_tree_train_cost
-
-    if "eval_cost" not in df.columns:
-        df["eval_cost"] = df["c"]
-
-    if "pv_ates_grouped_means" not in df.columns:
-        df["pv_ates_grouped_means"] = df["pv_ates_means"]
-    if "pv_ates_grouped_sds" not in df.columns:
-        if "pv_ates_sds" in df.columns:
-            df["pv_ates_grouped_sds"] = df["pv_ates_sds"]
-        else:
-            df["pv_ates_grouped_sds"] = np.nan
-
-    if "pv_ates_grouped_oracle_means" not in df.columns:
-        if "pv_ates_oracle_means" in df.columns:
-            df["pv_ates_grouped_oracle_means"] = df["pv_ates_oracle_means"]
-        else:
-            df["pv_ates_grouped_oracle_means"] = df["pv_ates_means"]
-    if "pv_ates_grouped_oracle_sds" not in df.columns:
-        if "pv_ates_sds" in df.columns:
-            df["pv_ates_grouped_oracle_sds"] = df["pv_ates_sds"]
-        else:
-            df["pv_ates_grouped_oracle_sds"] = np.nan
-
-    numeric_cols = [
-        "run_id",
-        "tree_train_cost",
-        "c",
-        "eval_cost",
-        "pv_cates_means",
-        "pv_trees_means",
-        "pv_ates_means",
-        "pv_ates_grouped_means",
-        "pv_ates_grouped_sds",
-        "pv_ates_grouped_oracle_means",
-        "pv_ates_grouped_oracle_sds",
-    ]
-    for col in numeric_cols:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if "cate_minus_tree_means" not in df.columns:
-        df["cate_minus_tree_means"] = df["pv_cates_means"] - df["pv_trees_means"]
-    # Use grouped train/test ATE as the default ATE baseline in analysis.
-    df["cate_minus_ate_means"] = df["pv_cates_means"] - df["pv_ates_grouped_means"]
-    df["cate_minus_best_baseline_means"] = df["pv_cates_means"] - np.maximum(
-        df["pv_ates_grouped_means"], df["pv_trees_means"]
-    )
-    if "n_rows" not in df.columns:
-        df["n_rows"] = np.nan
-    for sd_col, _ in SD_SE_SPECS:
-        if sd_col not in df.columns:
-            df[sd_col] = np.nan
-
-    if "cost_misspec" not in df.columns:
-        df["cost_misspec"] = df["eval_cost"] - df["tree_train_cost"]
-    if "abs_cost_misspec" not in df.columns:
-        df["abs_cost_misspec"] = np.abs(df["cost_misspec"])
-
-    for sd_col, _ in SD_SE_SPECS:
-        df[sd_col] = pd.to_numeric(df[sd_col], errors="coerce")
-
-    df["best_baseline"] = np.where(df["pv_ates_grouped_means"] >= df["pv_trees_means"], "ate", "tree")
-    return df
+        raise ValueError(
+            "Summary CSV is missing required columns: "
+            f"{missing}. Please regenerate summaries with policylearning.py."
+        )
+    return summary, paths
 
 
-def apply_row_filters(df, args):
+def apply_filters(df, args):
     out = df.copy()
-
-    states = parse_csv_arg(args.states)
-    if states:
-        out = out[out["state"].isin(states)]
 
     datasets = parse_csv_arg(args.datasets)
     if datasets:
-        out = out[out["dataset"].isin(datasets)]
+        out = out[out["dataset"].astype(str).isin(datasets)].copy()
 
-    eval_modes = parse_csv_arg(args.evaluation_modes)
-    if eval_modes:
-        out = out[out["evaluation_mode"].isin(eval_modes)]
+    states = parse_csv_arg(args.states)
+    if states:
+        out = out[out["state"].astype(str).isin(states)].copy()
 
-    experiment_names = parse_csv_arg(args.experiment_names)
-    if experiment_names:
-        out = out[out["experiment_name"].isin(experiment_names)]
+    evaluation_modes = parse_csv_arg(args.evaluation_modes)
+    if evaluation_modes:
+        out = out[out["evaluation_mode"].astype(str).isin(evaluation_modes)].copy()
 
     run_ids = parse_csv_arg(args.run_ids)
     if run_ids:
-        run_id_values = {int(x) for x in run_ids}
-        out = out[out["run_id"].isin(run_id_values)]
-
-    if args.min_n_rows is not None:
-        out = out[(out["n_rows"].isna()) | (out["n_rows"] >= args.min_n_rows)]
+        run_ids_int = []
+        for value in run_ids:
+            try:
+                run_ids_int.append(int(value))
+            except ValueError as exc:
+                raise ValueError(f"Could not parse run id '{value}' as int.") from exc
+        out = out[out["run_id"].isin(run_ids_int)].copy()
 
     return out
 
 
-def collapse_duplicates(df):
-    # If the same policy/cost appears multiple times (e.g., overlapping input files),
-    # average metrics so ranking is not biased by duplicate rows.
-    group_cols = POLICY_GROUP_COLS + ["eval_cost"]
-    collapsed = (
-        df.groupby(group_cols, as_index=False, dropna=False)
-        .agg(
-            pv_cates_means=("pv_cates_means", "mean"),
-            pv_trees_means=("pv_trees_means", "mean"),
-            pv_ates_means=("pv_ates_means", "mean"),
-            pv_ates_grouped_means=("pv_ates_grouped_means", "mean"),
-            pv_ates_grouped_oracle_means=("pv_ates_grouped_oracle_means", "mean"),
-            pv_cates_sds=("pv_cates_sds", "mean"),
-            pv_trees_sds=("pv_trees_sds", "mean"),
-            pv_ates_sds=("pv_ates_sds", "mean"),
-            pv_ates_grouped_sds=("pv_ates_grouped_sds", "mean"),
-            pv_ates_grouped_oracle_sds=("pv_ates_grouped_oracle_sds", "mean"),
-            cate_minus_tree_means=("cate_minus_tree_means", "mean"),
-            cate_minus_ate_means=("cate_minus_ate_means", "mean"),
-            cate_minus_best_baseline_means=("cate_minus_best_baseline_means", "mean"),
-            n_rows=("n_rows", "mean"),
-            source_file=("source_file", "first"),
-            duplicate_count=("source_file", "size"),
-        )
+def _combine_mean_sd(group, mean_col, sd_col):
+    n = pd.to_numeric(group["n_rows"], errors="coerce").to_numpy(dtype=float)
+    means = pd.to_numeric(group[mean_col], errors="coerce").to_numpy(dtype=float)
+    sds = pd.to_numeric(group[sd_col], errors="coerce").to_numpy(dtype=float)
+
+    valid = np.isfinite(n) & (n > 0) & np.isfinite(means)
+    if not np.any(valid):
+        return np.nan, np.nan
+
+    n = n[valid]
+    means = means[valid]
+    sds = sds[valid]
+    sds = np.where(np.isfinite(sds), sds, 0.0)
+
+    total_n = float(n.sum())
+    pooled_mean = float(np.sum(n * means) / total_n)
+    pooled_second_moment = float(np.sum(n * (sds**2 + means**2)) / total_n)
+    pooled_var = max(pooled_second_moment - pooled_mean**2, 0.0)
+    pooled_sd = float(np.sqrt(pooled_var))
+    return pooled_mean, pooled_sd
+
+
+def collapse_summary_rows(df):
+    key_cols = ["dataset", "experiment_name", "state", "evaluation_mode", "c", "tree_train_cost"]
+    metric_cols = [
+        ("pv_cates_means", "pv_cates_sds"),
+        ("pv_trees_means", "pv_trees_sds"),
+        ("pv_ates_grouped_means", "pv_ates_grouped_sds"),
+    ]
+
+    rows = []
+    grouped = df.groupby(key_cols, dropna=False)
+    for keys, group in grouped:
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        row = {col: value for col, value in zip(key_cols, keys)}
+
+        n_vals = pd.to_numeric(group["n_rows"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        row["n_rows"] = int(np.round(np.sum(np.where(np.isfinite(n_vals), n_vals, 0.0))))
+
+        if "n_tree_errors" in group.columns:
+            tree_err = pd.to_numeric(group["n_tree_errors"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            row["n_tree_errors"] = int(np.round(np.sum(np.where(np.isfinite(tree_err), tree_err, 0.0))))
+
+        for mean_col, sd_col in metric_cols:
+            pooled_mean, pooled_sd = _combine_mean_sd(group, mean_col=mean_col, sd_col=sd_col)
+            row[mean_col] = pooled_mean
+            row[sd_col] = pooled_sd
+
+        rows.append(row)
+
+    collapsed = pd.DataFrame(rows)
+    if collapsed.empty:
+        return collapsed
+    collapsed = collapsed.sort_values(
+        ["dataset", "experiment_name", "state", "evaluation_mode", "tree_train_cost", "c"],
+        ignore_index=True,
     )
-    collapsed["cost_misspec"] = collapsed["eval_cost"] - collapsed["tree_train_cost"]
-    collapsed["abs_cost_misspec"] = np.abs(collapsed["cost_misspec"])
-    collapsed["best_baseline"] = np.where(
-        collapsed["pv_ates_grouped_means"] >= collapsed["pv_trees_means"], "ate", "tree"
-    )
-    n_rows_eff = pd.to_numeric(collapsed["n_rows"], errors="coerce") * pd.to_numeric(
-        collapsed["duplicate_count"], errors="coerce"
-    ).fillna(1.0)
-    collapsed["n_rows_eff"] = np.where(n_rows_eff > 0, n_rows_eff, np.nan)
-    for sd_col, se_col in SD_SE_SPECS:
-        collapsed[se_col] = collapsed[sd_col] / np.sqrt(collapsed["n_rows_eff"])
     return collapsed
 
 
-def compute_policy_rankings(cost_rows, args):
-    df = cost_rows.copy()
-
-    df["cate_positive"] = (df["pv_cates_means"] >= args.cate_positive_threshold).astype(float)
-    df["ate_positive"] = (df["pv_ates_grouped_means"] >= args.ate_positive_threshold).astype(float)
-    df["joint_positive"] = (
-        (df["pv_cates_means"] >= args.cate_positive_threshold)
-        & (df["pv_ates_grouped_means"] >= args.ate_positive_threshold)
-    ).astype(float)
-
-    sweep = (
-        df.groupby(POLICY_GROUP_COLS, as_index=False, dropna=False)
-        .agg(
-            n_cost_points=("eval_cost", "size"),
-            eval_cost_min=("eval_cost", "min"),
-            eval_cost_max=("eval_cost", "max"),
-            sum_adv_vs_tree=("cate_minus_tree_means", "sum"),
-            sum_adv_vs_ate=("cate_minus_ate_means", "sum"),
-            sum_adv_vs_best=("cate_minus_best_baseline_means", "sum"),
-            mean_adv_vs_tree=("cate_minus_tree_means", "mean"),
-            mean_adv_vs_ate=("cate_minus_ate_means", "mean"),
-            mean_adv_vs_best=("cate_minus_best_baseline_means", "mean"),
-            cate_positive_share=("cate_positive", "mean"),
-            ate_positive_share=("ate_positive", "mean"),
-            joint_positive_share=("joint_positive", "mean"),
-            duplicate_count_sum=("duplicate_count", "sum"),
-        )
-    )
-
-    target_rows = df.copy()
-    target_rows["target_cost_distance"] = np.abs(target_rows["eval_cost"] - target_rows["tree_train_cost"])
-    target_rows = (
-        target_rows.sort_values(POLICY_GROUP_COLS + ["target_cost_distance", "eval_cost"])
-        .groupby(POLICY_GROUP_COLS, as_index=False, dropna=False)
-        .head(1)
-    )
-
-    target_rows = target_rows[
-        POLICY_GROUP_COLS
-        + [
-            "eval_cost",
-            "target_cost_distance",
-            "pv_trees_means",
-            "pv_cates_means",
-            "pv_ates_grouped_means",
-            "cate_minus_tree_means",
-            "cate_minus_ate_means",
-            "cate_minus_best_baseline_means",
-        ]
-    ].rename(
-        columns={
-            "eval_cost": "tree_target_eval_cost",
-            "pv_trees_means": "tree_value_at_target_cost",
-            "pv_cates_means": "cate_value_at_target_cost",
-            "pv_ates_grouped_means": "ate_value_at_target_cost",
-            "cate_minus_tree_means": "adv_vs_tree_at_target_cost",
-            "cate_minus_ate_means": "adv_vs_ate_at_target_cost",
-            "cate_minus_best_baseline_means": "adv_vs_best_at_target_cost",
-        }
-    )
-
-    ranking = sweep.merge(target_rows, on=POLICY_GROUP_COLS, how="left")
-    ranking["combined_sweep_advantage"] = ranking["sum_adv_vs_tree"] + ranking["sum_adv_vs_ate"]
-
-    ranking["passes_nontriviality"] = (
-        (ranking["cate_positive_share"] >= args.min_cate_positive_share)
-        & (ranking["ate_positive_share"] >= args.min_ate_positive_share)
-        & (ranking["joint_positive_share"] >= args.min_joint_positive_share)
-        & (ranking["tree_value_at_target_cost"] >= args.tree_opt_positive_threshold)
-        & (ranking["n_cost_points"] >= args.min_cost_points)
-    )
-
-    ranking["nontriviality_score"] = (
-        ranking["cate_positive_share"]
-        + ranking["ate_positive_share"]
-        + ranking["joint_positive_share"]
-    ) / 3.0
-
-    ranking["ranking_score"] = ranking["combined_sweep_advantage"]
-    if args.nontriviality_penalty > 0:
-        ranking.loc[~ranking["passes_nontriviality"], "ranking_score"] = (
-            ranking.loc[~ranking["passes_nontriviality"], "ranking_score"] - args.nontriviality_penalty
-        )
-
-    ranking["policy_id"] = (
-        "dataset="
-        + ranking["dataset"].astype(str)
-        + "|run="
-        + ranking["run_id"].fillna(-1).astype(int).astype(str)
-        + "|exp="
-        + ranking["experiment_name"].astype(str)
-        + "|state="
-        + ranking["state"].astype(str)
-        + "|mode="
-        + ranking["evaluation_mode"].astype(str)
-        + "|tree_cost="
-        + ranking["tree_train_cost"].map(lambda x: f"{x:.6f}")
-    )
-
-    ranking = ranking.sort_values(
-        [
-            "passes_nontriviality",
-            "ranking_score",
-            "combined_sweep_advantage",
-            "sum_adv_vs_tree",
-            "sum_adv_vs_ate",
-        ],
-        ascending=[False, False, False, False, False],
-    ).reset_index(drop=True)
-    ranking["rank"] = np.arange(1, len(ranking) + 1)
-
-    return ranking
+def add_standard_errors(df):
+    out = df.copy()
+    n = out["n_rows"].astype(float)
+    sqrt_n = np.sqrt(np.where(n > 0, n, np.nan))
+    out["pv_cates_se"] = out["pv_cates_sds"] / sqrt_n
+    out["pv_trees_se"] = out["pv_trees_sds"] / sqrt_n
+    out["pv_ates_grouped_se"] = out["pv_ates_grouped_sds"] / sqrt_n
+    return out
 
 
-def select_top_cost_paths(cost_rows, ranking, top_k):
-    top_policy_ids = ranking.head(top_k)["policy_id"].tolist()
-    if not top_policy_ids:
-        return cost_rows.iloc[0:0].copy()
+def add_plot_columns(df, y_mode):
+    out = df.copy()
 
-    keyed = cost_rows.copy()
-    keyed["policy_id"] = (
-        "dataset="
-        + keyed["dataset"].astype(str)
-        + "|run="
-        + keyed["run_id"].fillna(-1).astype(int).astype(str)
-        + "|exp="
-        + keyed["experiment_name"].astype(str)
-        + "|state="
-        + keyed["state"].astype(str)
-        + "|mode="
-        + keyed["evaluation_mode"].astype(str)
-        + "|tree_cost="
-        + keyed["tree_train_cost"].map(lambda x: f"{x:.6f}")
-    )
-    out = keyed[keyed["policy_id"].isin(top_policy_ids)].copy()
-    out = out.merge(
-        ranking[["policy_id", "rank", "passes_nontriviality", "ranking_score"]],
-        on="policy_id",
-        how="left",
-    )
-    return out.sort_values(["rank", "eval_cost"])
+    if y_mode == "delta_ate":
+        out["plot_cate"] = out["pv_cates_means"] - out["pv_ates_grouped_means"]
+        out["plot_tree"] = out["pv_trees_means"] - out["pv_ates_grouped_means"]
+        out["plot_ate"] = 0.0
+
+        out["plot_cate_se"] = np.sqrt(out["pv_cates_se"] ** 2 + out["pv_ates_grouped_se"] ** 2)
+        out["plot_tree_se"] = np.sqrt(out["pv_trees_se"] ** 2 + out["pv_ates_grouped_se"] ** 2)
+        out["plot_ate_se"] = 0.0
+    else:
+        out["plot_cate"] = out["pv_cates_means"]
+        out["plot_tree"] = out["pv_trees_means"]
+        out["plot_ate"] = out["pv_ates_grouped_means"]
+
+        out["plot_cate_se"] = out["pv_cates_se"]
+        out["plot_tree_se"] = out["pv_trees_se"]
+        out["plot_ate_se"] = out["pv_ates_grouped_se"]
+
+    return out
 
 
-def plot_policy_curves(cost_paths, ranking, top_n, output_path, title_prefix, plot_y_mode):
-    if top_n <= 0 or ranking.empty or cost_paths.empty:
-        return None
+def _plot_band(ax, x, y, se, color, alpha=0.18):
+    lower = y - se
+    upper = y + se
+    ax.fill_between(x, lower, upper, color=color, alpha=alpha, linewidth=0)
 
-    try:
-        import matplotlib.pyplot as plt
-    except ImportError as exc:
-        raise RuntimeError(
-            "matplotlib is required for plotting. Install it or run without --plot-top-nontrivial."
-        ) from exc
 
-    top_ranked = ranking.head(top_n).copy()
-    policy_ids = top_ranked["policy_id"].tolist()
-    plot_df = cost_paths[cost_paths["policy_id"].isin(policy_ids)].copy()
-    if plot_df.empty:
-        return None
+def _slugify(name):
+    slug = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(name).strip())
+    slug = slug.strip("_")
+    return slug or "dataset"
 
-    n_panels = len(policy_ids)
-    fig, axes = plt.subplots(n_panels, 1, figsize=(5, 3.8 * n_panels), sharex=True)
-    if n_panels == 1:
-        axes = [axes]
 
-    for ax, policy_id in zip(axes, policy_ids):
-        series = plot_df[plot_df["policy_id"] == policy_id].sort_values("eval_cost")
-        if series.empty:
+def make_dataset_plot(rows, dataset_name, y_mode, output_path, dpi):
+    modes = [("holdout", "holdout"), ("full", "full information")]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), sharey=True)
+
+    y_label = "Policy Value" if y_mode == "absolute" else "Policy Value (Delta vs grouped ATE)"
+
+    for ax, (mode, panel_label) in zip(axes, modes):
+        sub = rows[rows["evaluation_mode"] == mode].sort_values("c")
+        ax.set_xlabel(f"Evaluation cost ({panel_label})")
+        ax.grid(alpha=0.22)
+
+        if sub.empty:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.axhline(0.0, color="#adb5bd", linewidth=1.0)
             continue
 
-        rank_row = top_ranked[top_ranked["policy_id"] == policy_id].iloc[0]
-        x = pd.to_numeric(series["eval_cost"], errors="coerce").to_numpy(dtype=float)
-        baseline_mean = pd.to_numeric(series["pv_ates_grouped_means"], errors="coerce").to_numpy(dtype=float)
-        baseline_se = (
-            pd.to_numeric(series["pv_ates_grouped_se"], errors="coerce").to_numpy(dtype=float)
-            if "pv_ates_grouped_se" in series.columns
-            else np.full_like(baseline_mean, np.nan)
-        )
-        plot_specs = [
-            ("pv_cates_means", "pv_cates_se", "CATE+postprocess", "#1f77b4"),
-            ("pv_trees_means", "pv_trees_se", "Policy tree", "#ff7f0e"),
-        ]
-        if plot_y_mode == "absolute":
-            plot_specs.append(
-                ("pv_ates_grouped_means", "pv_ates_grouped_se", "ATE grouped (train/test)", "#2ca02c")
+        train_costs = sorted(pd.Series(sub["tree_train_cost"]).dropna().unique().tolist())
+        if len(train_costs) > 1:
+            raise ValueError(
+                f"Dataset '{dataset_name}' mode '{mode}' has multiple tree_train_cost values. "
+                "Expected exactly one parameter setting."
             )
-        for mean_col, se_col, label, color in plot_specs:
-            y_raw = pd.to_numeric(series[mean_col], errors="coerce").to_numpy(dtype=float)
-            if plot_y_mode == "delta_ate":
-                y = y_raw - baseline_mean
-            else:
-                y = y_raw
-            ax.plot(
-                x,
-                y,
-                marker="o",
-                markersize=3,
-                linewidth=1.5,
-                color=color,
-                label=label,
+
+        x = sub["c"].to_numpy(dtype=float)
+        cate_y = sub["plot_cate"].to_numpy(dtype=float)
+        tree_y = sub["plot_tree"].to_numpy(dtype=float)
+        ate_y = sub["plot_ate"].to_numpy(dtype=float)
+
+        cate_se = sub["plot_cate_se"].to_numpy(dtype=float)
+        tree_se = sub["plot_tree_se"].to_numpy(dtype=float)
+        ate_se = sub["plot_ate_se"].to_numpy(dtype=float)
+
+        ax.plot(x, cate_y, color="#0b6e4f", linewidth=2.2, label="CATE + postprocess")
+        _plot_band(ax, x, cate_y, cate_se, color="#0b6e4f")
+
+        ax.plot(x, tree_y, color="#c1121f", linewidth=2.2, label="Policy tree")
+        _plot_band(ax, x, tree_y, tree_se, color="#c1121f")
+
+        if y_mode == "absolute":
+            ax.plot(x, ate_y, color="#4a4e69", linewidth=2.0, linestyle="--", label="Grouped ATE")
+            _plot_band(ax, x, ate_y, ate_se, color="#4a4e69", alpha=0.12)
+
+        if train_costs:
+            ax.axvline(
+                float(train_costs[0]),
+                color="#6c757d",
+                linestyle=":",
+                linewidth=1.3,
+                label="Tree train cost",
             )
-            if se_col in series.columns:
-                current_se = pd.to_numeric(series[se_col], errors="coerce").to_numpy(dtype=float)
-                if plot_y_mode == "delta_ate":
-                    # Approximate SE for differences assuming independence.
-                    se = np.where(
-                        np.isfinite(baseline_se),
-                        np.sqrt(np.square(current_se) + np.square(baseline_se)),
-                        current_se,
-                    )
-                else:
-                    se = current_se
+        ax.axhline(0.0, color="#adb5bd", linewidth=1.0)
 
-                valid = np.isfinite(y) & np.isfinite(se)
-                if valid.any():
-                    lower = y - 1.96 * se
-                    upper = y + 1.96 * se
-                    ax.fill_between(x[valid], lower[valid], upper[valid], color=color, alpha=0.15)
+    axes[0].set_ylabel(y_label)
 
-        ax.axvline(rank_row["tree_train_cost"], color="gray", linestyle="--", linewidth=1)
-        if plot_y_mode == "delta_ate":
-            ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
-            ax.set_ylabel("Delta policy value vs grouped ATE")
-        else:
-            ax.axhline(0.0, color="black", linestyle=":", linewidth=1)
-            ax.set_ylabel("Policy value")
-        ax.grid(alpha=0.25)
-        run_id_val = int(rank_row["run_id"]) if pd.notna(rank_row["run_id"]) else -1
-        dataset_val = str(rank_row["dataset"])
-        exp_val = str(rank_row["experiment_name"])
-        state_val = str(rank_row["state"])
-        mode_val = str(rank_row["evaluation_mode"])
-        nontrivial_val = bool(rank_row["passes_nontriviality"])
-        joint_pos_val = float(rank_row["joint_positive_share"])
-        tree_target_val = float(rank_row["tree_value_at_target_cost"])
-        ax.set_title(
-            f"Rank {int(rank_row['rank'])} | dataset={dataset_val} | mode={mode_val} | state={state_val}\n"
-            f"run={run_id_val} | nontrivial={nontrivial_val} | joint_pos={joint_pos_val:.2f} | "
-            f"exp={exp_val} | tree@target={tree_target_val:.4f}"
-        )
+    handles, labels = [], []
+    for ax in axes:
+        h, l = ax.get_legend_handles_labels()
+        handles.extend(h)
+        labels.extend(l)
+    dedup = {}
+    for h, l in zip(handles, labels):
+        dedup[l] = h
+    if dedup:
+        fig.legend(dedup.values(), dedup.keys(), loc="lower center", ncol=4, fontsize=9)
 
-    axes[-1].set_xlabel("Treatment cost")
-    handles, labels = axes[0].get_legend_handles_labels()
-    fig.legend(
-        handles,
-        labels,
-        loc="upper center",
-        ncol=max(1, min(len(labels), 3)),
-        frameon=False,
-        bbox_to_anchor=(0.5, 1.01),
-    )
-    fig.suptitle(title_prefix, y=1.04, fontsize=12)
-    fig.tight_layout()
-
+    fig.suptitle(str(dataset_name), fontsize=14)
+    fig.tight_layout(rect=[0, 0.08, 1, 0.92])
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    fig.savefig(output_path, dpi=dpi)
     plt.close(fig)
     return output_path
 
 
-def build_parser():
+def make_plots(plot_rows, y_mode, output_dir, output_prefix, dpi):
+    output_paths = []
+    datasets = sorted(plot_rows["dataset"].astype(str).unique().tolist())
+    for dataset_name in datasets:
+        rows = plot_rows[plot_rows["dataset"].astype(str) == dataset_name].copy()
+        output_path = output_dir / f"{output_prefix}_{_slugify(dataset_name)}_holdout_vs_full.png"
+        saved = make_dataset_plot(rows, dataset_name, y_mode=y_mode, output_path=output_path, dpi=dpi)
+        output_paths.append(saved)
+    return output_paths
+
+
+def build_arg_parser():
     parser = argparse.ArgumentParser(
-        description="Rank fixed-tree-cost policies by integrated sweep advantage and non-triviality criteria."
+        description="Plot holdout vs full-information policy-value curves side by side for each dataset."
     )
+    parser.add_argument("--summary-paths", type=str, default=None, help="Comma-separated summary CSV paths.")
     parser.add_argument(
         "--summary-glob",
         type=str,
-        default="results/policy_learning_results_*.csv",
-        help="Glob for summary CSV files.",
-    )
-    parser.add_argument(
-        "--summary-paths",
-        type=str,
         default=None,
-        help="Comma-separated explicit summary CSV paths.",
+        help="Comma-separated glob patterns for summary CSVs (e.g. results/_array_tmp/gerber/summary_*.csv).",
     )
     parser.add_argument("--output-dir", type=str, default="results/analysis")
-    parser.add_argument("--output-prefix", type=str, default="policy_sweep")
-    parser.add_argument("--top-k", type=int, default=25)
-    parser.add_argument("--top-k-cost-paths", type=int, default=10)
+    parser.add_argument("--output-prefix", type=str, default="policy_compare")
 
-    parser.add_argument("--states", type=str, default=None)
-    parser.add_argument("--datasets", type=str, default=None)
-    parser.add_argument("--evaluation-modes", type=str, default=None)
-    parser.add_argument("--experiment-names", type=str, default=None)
-    parser.add_argument("--run-ids", type=str, default=None)
-    parser.add_argument("--min-n-rows", type=int, default=1)
+    parser.add_argument("--datasets", type=str, default=None, help="Optional dataset filter.")
+    parser.add_argument("--states", type=str, default=None, help="Optional state/group filter.")
+    parser.add_argument(
+        "--evaluation-modes",
+        type=str,
+        default="holdout,full",
+        help="Optional eval-mode filter. Defaults to holdout,full.",
+    )
+    parser.add_argument("--run-ids", type=str, default=None, help="Optional run-id filter.")
 
-    parser.add_argument("--default-tree-train-cost", type=float, default=0.1)
-    parser.add_argument("--default-evaluation-mode", type=str, default="holdout")
-
-    parser.add_argument("--cate-positive-threshold", type=float, default=0.0)
-    parser.add_argument("--ate-positive-threshold", type=float, default=0.0)
-    parser.add_argument("--tree-opt-positive-threshold", type=float, default=0.0)
-    parser.add_argument("--min-cate-positive-share", type=float, default=0.8)
-    parser.add_argument("--min-ate-positive-share", type=float, default=0.8)
-    parser.add_argument("--min-joint-positive-share", type=float, default=0.8)
-    parser.add_argument("--min-cost-points", type=int, default=5)
-    parser.add_argument("--nontriviality-penalty", type=float, default=0.0)
-    parser.add_argument("--nontrivial-only", action="store_true")
-    parser.add_argument("--plot-top-nontrivial", type=int, default=3)
     parser.add_argument(
         "--plot-y-mode",
         type=str,
         choices=["delta_ate", "absolute"],
         default="delta_ate",
-        help="Plot either policy value deltas vs grouped ATE, or absolute policy values.",
+        help="Plot delta vs grouped ATE or absolute policy values.",
     )
+    parser.add_argument("--dpi", type=int, default=200)
     return parser
 
 
-def main():
-    parser = build_parser()
-    args = parser.parse_args()
+def main(args):
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    summary = load_summary_frames(args.summary_paths, args.summary_glob)
-    summary = ensure_columns(summary, args)
-    summary = apply_row_filters(summary, args)
+    summary, input_paths = load_summaries(args.summary_paths, args.summary_glob)
+    summary = apply_filters(summary, args)
     if summary.empty:
-        raise RuntimeError("No summary rows remain after filtering.")
+        raise RuntimeError("No rows remaining after filters.")
 
-    cost_rows = collapse_duplicates(summary)
-    rankings = compute_policy_rankings(cost_rows, args)
+    combined_summary_path = output_dir / f"{args.output_prefix}_summary_combined.csv"
+    summary = collapse_summary_rows(summary)
+    summary.to_csv(combined_summary_path, index=False)
 
-    if args.nontrivial_only:
-        rankings = rankings[rankings["passes_nontriviality"]].copy()
-        rankings = rankings.reset_index(drop=True)
-        rankings["rank"] = np.arange(1, len(rankings) + 1)
+    summary = add_standard_errors(summary)
+    plot_rows = add_plot_columns(summary, y_mode=args.plot_y_mode)
 
-    if rankings.empty:
-        raise RuntimeError("No ranked policies remain after applying constraints.")
+    cost_rows_path = output_dir / f"{args.output_prefix}_cost_rows_collapsed.csv"
+    plot_rows.to_csv(cost_rows_path, index=False)
 
-    top_rankings = rankings.head(args.top_k).copy()
-    nontrivial_rankings = rankings[rankings["passes_nontriviality"]].copy()
-    top_nontrivial = nontrivial_rankings.head(args.top_k).copy()
-    top_cost_paths = select_top_cost_paths(cost_rows, top_rankings, args.top_k_cost_paths)
-    top_nontrivial_cost_paths = select_top_cost_paths(cost_rows, top_nontrivial, args.top_k_cost_paths)
-
-    out_dir = Path(args.output_dir)
-    prefix = args.output_prefix
-
-    top_overall_plot_path = out_dir / f"{prefix}_top_overall_policies.png"
-    top_nontrivial_plot_path = out_dir / f"{prefix}_top_nontrivial_policies.png"
-    plot_mode_label = (
-        "delta vs grouped ATE" if args.plot_y_mode == "delta_ate" else "absolute policy value"
+    saved_paths = make_plots(
+        plot_rows,
+        y_mode=args.plot_y_mode,
+        output_dir=output_dir,
+        output_prefix=args.output_prefix,
+        dpi=args.dpi,
     )
 
-    if args.nontrivial_only:
-        plot_ranking = top_nontrivial
-        plot_cost_paths = top_nontrivial_cost_paths
-        plot_output_path = top_nontrivial_plot_path
-        plot_title = f"Top {args.plot_top_nontrivial} non-trivial policies ({plot_mode_label})"
+    print(f"Loaded {len(input_paths)} summary file(s).")
+    print(f"Combined summary written to: {combined_summary_path}")
+    print(f"Collapsed rows written to: {cost_rows_path}")
+    if saved_paths:
+        print("Plots written to:")
+        for path in saved_paths:
+            print(f"  {path}")
     else:
-        plot_ranking = top_rankings
-        plot_cost_paths = top_cost_paths
-        plot_output_path = top_overall_plot_path
-        plot_title = f"Top {args.plot_top_nontrivial} overall policies ({plot_mode_label})"
+        print("No plots generated.")
 
-    plot_policy_curves(
-        cost_paths=plot_cost_paths,
-        ranking=plot_ranking,
-        top_n=args.plot_top_nontrivial,
-        output_path=plot_output_path,
-        title_prefix=plot_title,
-        plot_y_mode=args.plot_y_mode,
-    )
-
-    print(f"Filtered input rows: {len(summary)}")
-    print(f"Unique policy-cost rows: {len(cost_rows)}")
-    print(f"Ranked policies: {len(rankings)}")
 
 if __name__ == "__main__":
-    main()
+    parser = build_arg_parser()
+    parsed_args = parser.parse_args()
+    main(parsed_args)

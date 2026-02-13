@@ -8,16 +8,27 @@ pip install -r requirements.txt
 
 ## Run simulations
 ```
-sbatch run.sh experiments/debug_full_info.txt
+sbatch --array=0-9 gerber.sh
+sbatch --array=0-9 nsw.sh
 ```
 
-Use `--dataset all` in a manifest (see `experiments/policy_sweep_example.txt`) to run both configured datasets:
-- `gerber`: defaults to `treat` / `voted14`
-- `nsw`: defaults to `treated` / `re78`, filtered to `sample == 1`, with all covariates as default features
+Dataset-specific scripts:
+- `gerber.sh`
+- `nsw.sh`
+
+Each run now uses one parameter setting per dataset. `experiment_name` is set to the dataset name automatically.
+`full` evaluation mode means full-information evaluation (train + evaluate on the full sample, no train/test split).
+
+Array tasks write per-task outputs here:
+- `results/_array_tmp/gerber/summary_<run_id>.csv`
+- `results/_array_tmp/nsw/summary_<run_id>.csv`
 
 ## Run analysis
 ```
-python3 analyze_policy_results.py --summary-paths results/sweeps/debug_full_info_summary.csv --output-dir results/analysis --output-prefix debug_full_info --plot-top-nontrivial 3
+python3 analyze_policy_results.py \
+  --summary-glob 'results/_array_tmp/gerber/summary_*.csv,results/_array_tmp/nsw/summary_*.csv' \
+  --output-dir results/analysis \
+  --output-prefix dataset_comparison
 ```
 
 ## Clear analysis in preparation for a new training run
