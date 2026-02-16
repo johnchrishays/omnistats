@@ -25,9 +25,9 @@ python3 "$PROJECT_DIR/policylearning.py" \
   --train-size 0.7 \
   --evaluation-modes holdout,full \
   --tree-max-depth 4 \
-  --tree-train-cost 1.5 \
+  --tree-train-cost 750 \
   --cost-grid-start 0.0 \
-  --cost-grid-stop 3.0 \
+  --cost-grid-stop 2000 \
   --cost-grid-num 21 \
   --run-id "${RUN_ID}" \
   --summary-path "${OUT_DIR}/summary_${RUN_ID}.csv" \

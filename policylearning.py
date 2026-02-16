@@ -376,15 +376,13 @@ def build_bucket_feature_matrix(
 
 def resolve_cate_bucket_config(dataset_name):
     feature_num_buckets = {}
-    outcome_num_buckets = None
     if dataset_name == "jtpa":
         feature_num_buckets["edu"] = 4
-        outcome_num_buckets = 4
-    return feature_num_buckets, outcome_num_buckets
+    return feature_num_buckets
 
 
-def build_cate_dataframe(df, feature_cols, dataset_name, outcome_var):
-    feature_num_buckets, outcome_num_buckets = resolve_cate_bucket_config(dataset_name=dataset_name)
+def build_cate_dataframe(df, feature_cols, dataset_name):
+    feature_num_buckets = resolve_cate_bucket_config(dataset_name=dataset_name)
     cate_df, feature_map, metadata = build_bucket_feature_matrix(
         df,
         feature_cols,
@@ -392,21 +390,6 @@ def build_cate_dataframe(df, feature_cols, dataset_name, outcome_var):
         default_num_buckets=2,
         feature_num_buckets=feature_num_buckets,
     )
-
-    if outcome_num_buckets is not None:
-        cate_df[outcome_var] = discretize_into_quantile_buckets(
-            cate_df[outcome_var],
-            n_buckets=outcome_num_buckets,
-        )
-        metadata.append(
-            {
-                "source_feature": outcome_var,
-                "binary_feature": outcome_var,
-                "transform": "quantile_bucket_outcome",
-                "num_buckets": outcome_num_buckets,
-            }
-        )
-
     return cate_df, feature_map, metadata
 
 
@@ -647,7 +630,6 @@ def run_experiment(args):
             df,
             selected_feature_union,
             dataset_name=dataset_name,
-            outcome_var=outcome_var,
         )
         cate_features = [feature_map[col] for col in raw_cate_features]
         policy_features = raw_policy_features # [feature_map[col] for col in raw_policy_features]
@@ -696,13 +678,11 @@ def run_experiment(args):
                     train_df,
                     selected_feature_union,
                     dataset_name=dataset_name,
-                    outcome_var=outcome_var,
                 )
                 cate_holdout_df, _, _ = build_cate_dataframe(
                     holdout_df,
                     selected_feature_union,
                     dataset_name=dataset_name,
-                    outcome_var=outcome_var,
                 )
             else:
                 # No holdout requested: use a deterministic split-seed marker.
