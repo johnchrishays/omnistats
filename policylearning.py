@@ -4,6 +4,7 @@ from pathlib import Path
 from econml.policy import DRPolicyTree
 import numpy as np
 import pandas as pd
+from scipy.io import loadmat
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
@@ -275,12 +276,6 @@ def load_dataframe(data_path):
     path = Path(data_path)
     suffix = path.suffix.lower()
     if suffix == ".mat":
-        try:
-            from scipy.io import loadmat
-        except ImportError as exc:
-            raise ImportError(
-                "Loading .mat files requires scipy. Install dependencies with `pip install -r requirements.txt`."
-            ) from exc
 
         mat = loadmat(path, squeeze_me=True)
         required_cols = ["D", "earnings", "edu", "prevearn"]
@@ -378,6 +373,7 @@ def resolve_cate_bucket_config(dataset_name):
     feature_num_buckets = {}
     if dataset_name == "jtpa":
         feature_num_buckets["edu"] = 4
+        feature_num_buckets["prevearn"] = 4
     return feature_num_buckets
 
 
