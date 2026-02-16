@@ -23,7 +23,7 @@ DATASET_PRESETS = {
         "treat_var": "treat",
         "outcome_var": "voted14",
         "subset_query": None,
-        "cate_feature_set": "cate_gerber",
+        "cate_feature_set": "cate_gerber_alt",
         "policy_feature_set": "policy_gerber",
         "inject_state_column": False,
     },
@@ -42,10 +42,11 @@ DATASET_PRESETS = {
 
 FEATURE_PRESETS = {
     "cate_gerber": ["i_age", "flag_hhid_mult_hhid", "flag_hhid_mult_z", "flag_drop_hhid",
-        "vote_hist", "vh_stratum", "vhblw", "d_married",
+        "vote_hist", "state_median", "vh_stratum", "vhblw", "d_married",
         "d_unmarried", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4"],
+    "cate_gerber_alt": ["vhblw", "vhabv", 'd_female', "d_hhsize1", "d_hhsize2", "d_hhsize3"],
     "policy_gerber": ["d_married", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4","d_race_b", "d_race_h", "d_race_o", "d_race_w", "d_female", "d_notfem"],
-    "cate_nsw": ['age', 'educ', 'black', 'married','hisp',  're74', 're75'],
+    "cate_nsw": ['age', 'educ', 'black', 'married', 'hisp',  're74', 're75'],
     "policy_nsw": ['age', 'educ', 'black', 'married','hisp', 'nodegree',  're74', 're75']
 }
 FEATURE_SET_CHOICES = sorted(list(FEATURE_PRESETS.keys()) + [ALL_FEATURE_SET])

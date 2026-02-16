@@ -26,8 +26,6 @@ Array tasks write per-task outputs here:
 ## Run analysis
 ```
 python3 analyze_policy_results.py \
-  --summary-glob 'results/_array_tmp/gerber/summary_*.csv,results/_array_tmp/nsw/summary_*.csv' \
-  --output-dir results/analysis \
   --plot-y-mode absolute
 ```
 
