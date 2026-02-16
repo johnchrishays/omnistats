@@ -1,7 +1,6 @@
 import argparse
 import json
 from pathlib import Path
-
 from econml.policy import DRPolicyTree
 import numpy as np
 import pandas as pd
@@ -38,6 +37,18 @@ DATASET_PRESETS = {
         "policy_feature_set": "cate_nsw",
         "inject_state_column": True,
     },
+    "jtpa": {
+        "data_path": "jtpa/jtpa_kt.mat",
+        "state_var": "__dataset_state__",
+        "state_value": "JTPA",
+        "treat_var": "D",
+        "outcome_var": "earnings",
+        "subset_query": None,
+        "cate_feature_set": "cate_jtpa",
+        "policy_feature_set": "policy_jtpa",
+        "drop_columns": ["recid"],
+        "inject_state_column": True,
+    },
 }
 
 FEATURE_PRESETS = {
@@ -47,7 +58,9 @@ FEATURE_PRESETS = {
     "cate_gerber_alt": ["vhblw", "vhabv", 'd_female', "d_hhsize1", "d_hhsize2", "d_hhsize3"],
     "policy_gerber": ["d_married", "d_hhsize1", "d_hhsize2", "d_hhsize3", "d_hhsize4","d_race_b", "d_race_h", "d_race_o", "d_race_w", "d_female", "d_notfem"],
     "cate_nsw": ['age', 'educ', 'black', 'married', 'hisp',  're74', 're75'],
-    "policy_nsw": ['age', 'educ', 'black', 'married','hisp', 'nodegree',  're74', 're75']
+    "policy_nsw": ['age', 'educ', 'black', 'married','hisp', 'nodegree',  're74', 're75'],
+    "cate_jtpa": ["edu", "prevearn"],
+    "policy_jtpa": ["edu", "prevearn"],
 }
 FEATURE_SET_CHOICES = sorted(list(FEATURE_PRESETS.keys()) + [ALL_FEATURE_SET])
 
@@ -261,6 +274,31 @@ def combine_queries(*queries):
 def load_dataframe(data_path):
     path = Path(data_path)
     suffix = path.suffix.lower()
+    if suffix == ".mat":
+        try:
+            from scipy.io import loadmat
+        except ImportError as exc:
+            raise ImportError(
+                "Loading .mat files requires scipy. Install dependencies with `pip install -r requirements.txt`."
+            ) from exc
+
+        mat = loadmat(path, squeeze_me=True)
+        required_cols = ["D", "earnings", "edu", "prevearn"]
+        optional_cols = ["recid"]
+
+        missing = [col for col in required_cols if col not in mat]
+        if missing:
+            raise ValueError(f"MAT file is missing required variables: {missing}")
+
+        def _flat(col_name):
+            return np.asarray(mat[col_name]).reshape(-1)
+
+        data = {col: _flat(col) for col in required_cols}
+        for col in optional_cols:
+            if col in mat:
+                data[col] = _flat(col)
+        return pd.DataFrame(data)
+
     if suffix == ".dta":
         return pd.read_stata(path)
     if suffix in {".tab", ".tsv"}:
@@ -270,21 +308,42 @@ def load_dataframe(data_path):
     return pd.read_csv(path)
 
 
-def infer_all_covariates(df_columns, protected_cols):
-    features = [col for col in sorted(df_columns) if col not in protected_cols]
-    if not features:
-        raise ValueError("No covariates available after excluding treatment/outcome/state columns.")
-    return features
+def discretize_into_quantile_buckets(series, n_buckets=4):
+    numeric = pd.to_numeric(series, errors="coerce")
+    out = pd.Series(np.nan, index=series.index, dtype=float)
+    valid = numeric.notna()
+    if not valid.any():
+        return out
+
+    ranked = numeric[valid].rank(method="first")
+    bucket_count = int(min(n_buckets, ranked.shape[0]))
+    if bucket_count <= 1:
+        out.loc[valid] = 0.0
+        return out
+
+    out.loc[valid] = pd.qcut(ranked, q=bucket_count, labels=False).astype(float)
+    return out
 
 
-def build_binary_feature_matrix(df, feature_cols, prefix="bin__"):
+def build_bucket_feature_matrix(
+    df,
+    feature_cols,
+    prefix="bin__",
+    default_num_buckets=2,
+    feature_num_buckets=None,
+):
     out = df.copy()
     feature_map = {}
     metadata = []
+    feature_num_buckets = feature_num_buckets or {}
 
     for col in dict.fromkeys(feature_cols):
         if col not in out.columns:
             raise ValueError(f"Feature column '{col}' is not present in data.")
+
+        num_buckets = int(feature_num_buckets.get(col, default_num_buckets))
+        if num_buckets <= 0:
+            raise ValueError(f"Number of buckets must be positive for feature '{col}'.")
 
         s_num = pd.to_numeric(out[col], errors="coerce")
         non_missing = s_num.dropna()
@@ -292,17 +351,15 @@ def build_binary_feature_matrix(df, feature_cols, prefix="bin__"):
         out_col = f"{prefix}{col}"
 
         if len(non_missing) == 0:
-            out[out_col] = 0
+            out[out_col] = np.int16(0)
             transform = "all_missing_to_zero"
-            median = np.nan
-        elif uniq.issubset({0.0, 1.0}):
+        elif uniq.issubset({0.0, 1.0}) and num_buckets == 2:
             out[out_col] = s_num.fillna(0.0).astype(np.int8)
             transform = "binary_passthrough"
-            median = np.nan
         else:
-            median = float(non_missing.median())
-            out[out_col] = (s_num.notna() & (s_num > median)).astype(np.int8)
-            transform = "median_split"
+            bucketed = discretize_into_quantile_buckets(s_num, n_buckets=num_buckets)
+            out[out_col] = bucketed.fillna(0.0).astype(np.int16)
+            transform = "quantile_bucket"
 
         feature_map[col] = out_col
         metadata.append(
@@ -310,11 +367,54 @@ def build_binary_feature_matrix(df, feature_cols, prefix="bin__"):
                 "source_feature": col,
                 "binary_feature": out_col,
                 "transform": transform,
-                "median": median,
+                "num_buckets": num_buckets,
             }
         )
 
     return out, feature_map, metadata
+
+
+def resolve_cate_bucket_config(dataset_name):
+    feature_num_buckets = {}
+    outcome_num_buckets = None
+    if dataset_name == "jtpa":
+        feature_num_buckets["edu"] = 4
+        outcome_num_buckets = 4
+    return feature_num_buckets, outcome_num_buckets
+
+
+def build_cate_dataframe(df, feature_cols, dataset_name, outcome_var):
+    feature_num_buckets, outcome_num_buckets = resolve_cate_bucket_config(dataset_name=dataset_name)
+    cate_df, feature_map, metadata = build_bucket_feature_matrix(
+        df,
+        feature_cols,
+        prefix="bin__",
+        default_num_buckets=2,
+        feature_num_buckets=feature_num_buckets,
+    )
+
+    if outcome_num_buckets is not None:
+        cate_df[outcome_var] = discretize_into_quantile_buckets(
+            cate_df[outcome_var],
+            n_buckets=outcome_num_buckets,
+        )
+        metadata.append(
+            {
+                "source_feature": outcome_var,
+                "binary_feature": outcome_var,
+                "transform": "quantile_bucket_outcome",
+                "num_buckets": outcome_num_buckets,
+            }
+        )
+
+    return cate_df, feature_map, metadata
+
+
+def infer_all_covariates(df_columns, protected_cols):
+    features = [col for col in sorted(df_columns) if col not in protected_cols]
+    if not features:
+        raise ValueError("No covariates available after excluding treatment/outcome/state columns.")
+    return features
 
 
 def resolve_dataset_runs(args):
@@ -543,7 +643,12 @@ def run_experiment(args):
             default_policy_feature_set=dataset_cfg["default_policy_feature_set"],
         )
         selected_feature_union = list(dict.fromkeys(raw_cate_features + raw_policy_features))
-        full_bin_df, feature_map, binarization_metadata = build_binary_feature_matrix(df, selected_feature_union)
+        full_cate_df, feature_map, binarization_metadata = build_cate_dataframe(
+            df,
+            selected_feature_union,
+            dataset_name=dataset_name,
+            outcome_var=outcome_var,
+        )
         cate_features = [feature_map[col] for col in raw_cate_features]
         policy_features = raw_policy_features # [feature_map[col] for col in raw_policy_features]
 
@@ -579,16 +684,26 @@ def run_experiment(args):
             train_df = None
             if "holdout" in eval_modes:
                 split_seed = int(rng.integers(0, 2**31 - 1))
-                train_df, holdout_df = train_test_split(
-                    df,
+                train_idx, holdout_idx = train_test_split(
+                    df.index.to_numpy(),
                     train_size=args.train_size,
                     shuffle=True,
                     random_state=split_seed,
                 )
-                bin_train_df, _, _ = build_binary_feature_matrix(train_df, selected_feature_union)
-                bin_holdout_df, _, _ = build_binary_feature_matrix(holdout_df, selected_feature_union)
-                train_df = train_df.copy()
-                holdout_df = holdout_df.copy()
+                train_df = df.loc[train_idx].copy()
+                holdout_df = df.loc[holdout_idx].copy()
+                cate_train_df, _, _ = build_cate_dataframe(
+                    train_df,
+                    selected_feature_union,
+                    dataset_name=dataset_name,
+                    outcome_var=outcome_var,
+                )
+                cate_holdout_df, _, _ = build_cate_dataframe(
+                    holdout_df,
+                    selected_feature_union,
+                    dataset_name=dataset_name,
+                    outcome_var=outcome_var,
+                )
             else:
                 # No holdout requested: use a deterministic split-seed marker.
                 split_seed = -1
@@ -600,8 +715,8 @@ def run_experiment(args):
                         "evaluation_mode": "holdout",
                         "split_mode": "random_split",
                         "split_seed": split_seed,
-                        "train_df": bin_train_df,
-                        "eval_df": bin_holdout_df,
+                        "train_df": cate_train_df,
+                        "eval_df": cate_holdout_df,
                         "nonbin_train_df": train_df,
                         "nonbin_eval_df": holdout_df,
                     }
@@ -612,8 +727,8 @@ def run_experiment(args):
                         "evaluation_mode": "full",
                         "split_mode": "full_information",
                         "split_seed": -1,
-                        "train_df": full_bin_df,
-                        "eval_df": full_bin_df,
+                        "train_df": full_cate_df,
+                        "eval_df": full_cate_df,
                         "nonbin_train_df": df,
                         "nonbin_eval_df": df,
                     }
@@ -621,7 +736,7 @@ def run_experiment(args):
 
             for scenario in scenarios:
                 train_ate = get_ate(
-                    scenario["train_df"],
+                    scenario["nonbin_train_df"],
                     treatment_var=treat_var,
                     outcome_var=outcome_var,
                 )["ate"]
@@ -648,7 +763,11 @@ def run_experiment(args):
                     tree_error = str(exc)
 
                 eval_df = scenario["eval_df"]
-                eval_ate = get_ate(eval_df, treatment_var=treat_var, outcome_var=outcome_var)["ate"]
+                eval_ate = get_ate(
+                    scenario["nonbin_eval_df"],
+                    treatment_var=treat_var,
+                    outcome_var=outcome_var,
+                )["ate"]
                 eval_cates = compute_cate(
                     eval_df,
                     cate_features,
@@ -703,8 +822,8 @@ def run_experiment(args):
                             "pv_ate_grouped": pv_ate_grouped,
                             "train_ate": train_ate,
                             "eval_ate": eval_ate,
-                            "n_train": int(scenario["train_df"].shape[0]),
-                            "n_eval": int(eval_df.shape[0]),
+                            "n_train": int(scenario["nonbin_train_df"].shape[0]),
+                            "n_eval": int(scenario["nonbin_eval_df"].shape[0]),
                             "tree_error": tree_error,
                         }
                     )

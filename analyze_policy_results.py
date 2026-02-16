@@ -29,6 +29,7 @@ REQUIRED_SUMMARY_COLUMNS = {
 STUDY_TITLES = {
     "gerber": "Social Pressure",
     "nsw": "National Supported Work Demonstration",
+    "jtpa": "Job Training Partnership Act",
 }
 
 # Keep seaborn's default color cycle accessible for reuse in future plots.
@@ -337,7 +338,7 @@ def build_arg_parser():
     parser.add_argument(
         "--summary-glob",
         type=str,
-        default="results/_array_tmp/gerber/summary_*.csv,results/_array_tmp/nsw/summary_*.csv",
+        default="results/_array_tmp/gerber/summary_*.csv,results/_array_tmp/nsw/summary_*.csv,results/_array_tmp/jtpa/summary_*.csv",
         help="Comma-separated glob patterns for summary CSVs (e.g. results/_array_tmp/gerber/summary_*.csv).",
     )
     parser.add_argument("--output-dir", type=str, default="results/analysis")

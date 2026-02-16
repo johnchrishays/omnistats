@@ -2,19 +2,29 @@
 
 ## Setup
 
+Install necessary packages:
 ```
 pip install -r requirements.txt
 ```
 
+Download the datasets, and put each into its corresponding directory.
+| Directory name | Data link | 
+|----------|----------|
+| `gerber`  | https://huber.research.yale.edu/writings.html  | 
+| `nsw` | https://dataverse.harvard.edu/file.xhtml?persistentId=doi:10.7910/DVN/23407/DYEWLO&version=1.0. |
+| `jtpa` | https://www.econometricsociety.org/publications/econometrica/2018/03/01/who-should-be-treated-empirical-welfare-maximization-methods |
+
 ## Run simulations
 ```
-sbatch --array=0-9 gerber.sh
-sbatch --array=0-9 nsw.sh
+sbatch gerber.sh
+sbatch nsw.sh
+sbatch jtpa.sh
 ```
 
 Dataset-specific scripts:
 - `gerber.sh`
 - `nsw.sh`
+- `jtpa.sh`
 
 Each run now uses one parameter setting per dataset. `experiment_name` is set to the dataset name automatically.
 `full` evaluation mode means full-information evaluation (train + evaluate on the full sample, no train/test split).
@@ -22,6 +32,7 @@ Each run now uses one parameter setting per dataset. `experiment_name` is set to
 Array tasks write per-task outputs here:
 - `results/_array_tmp/gerber/summary_<run_id>.csv`
 - `results/_array_tmp/nsw/summary_<run_id>.csv`
+- `results/_array_tmp/jtpa/summary_<run_id>.csv`
 
 ## Run analysis
 ```
